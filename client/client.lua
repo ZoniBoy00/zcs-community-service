@@ -4,7 +4,7 @@ local currentTask = nil
 local serviceBlips = {}
 local trashBags = {}
 local targetZones = {}
-local removedZones = {}
+local removedZones = {} -- Lisätty uusi taulukko poistetuille zoneille
 
 -- Framework initialization
 local Framework = nil
