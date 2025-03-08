@@ -1,3 +1,3 @@
-# Z_CommunityService
+# zcs-community-service
 
 ## WIP
