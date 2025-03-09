@@ -3,7 +3,7 @@ game 'gta5'
 
 name 'zcs_community_service'
 description 'ESX Community Service Script with OX Framework Support'
-author 'ZoniBoy00'
+author 'v0 Assistant'
 version '1.0.1'
 
 shared_scripts {

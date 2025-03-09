@@ -1,11 +1,24 @@
--- Optimized client-side script with improved performance
+-- Cache frequently accessed functions to avoid lookup costs
+local Wait = Citizen.Wait
+local vector3 = vector3
+local GetEntityCoords = GetEntityCoords
+local PlayerPedId = PlayerPedId
+local GetGameTimer = GetGameTimer
+local DoesEntityExist = DoesEntityExist
+local DoesBlipExist = DoesBlipExist
+local RemoveBlip = RemoveBlip
+local SetBlipRoute = SetBlipRoute
+local SetEntityCoords = SetEntityCoords
+local IsPedInAnyVehicle = IsPedInAnyVehicle
+local TaskLeaveVehicle = TaskLeaveVehicle
+local ClearPedTasks = ClearPedTasks
+local DetachEntity = DetachEntity
+local DeleteEntity = DeleteEntity
 
 -- Notification debounce system
-local lastNotifications = {}
 local activeTargetZones = {} -- Track all active target zones
 local isProcessingTask = false -- Flag to prevent multiple task processing
 local taskRequestQueued = false -- Flag to prevent multiple task requests
-local combatControlsThread = nil
 local inService = false
 local tasksRemaining = 0
 local currentCleaningSpot = nil
@@ -13,38 +26,17 @@ local cleaningSpots = {}
 local blips = {}
 local markerThread = nil
 local boundaryThread = nil
-local lastCombatControlTime = 0
-local combatControlInterval = 100 -- Check combat controls every 100ms instead of every frame
-
--- Pre-cache frequently used values
-local COMBAT_CONTROLS = {
-    24, 25, 47, 58, 140, 141, 142, 143, 263, 264, 257, 37, 
-    157, 158, 160, 164, 165, 159, 161, 162, 163
-}
-
--- Function to disable combat controls - optimized to run less frequently
-function DisableCombatControls()
-    local currentTime = GetGameTimer()
-    if currentTime - lastCombatControlTime < combatControlInterval then
-        return -- Skip if we checked recently
-    end
-    
-    lastCombatControlTime = currentTime
-    
-    -- Check if player is trying to use a weapon before disabling controls
-    local playerPed = PlayerPedId()
-    if IsPedArmed(playerPed, 4) or IsPedArmed(playerPed, 1) or IsPedArmed(playerPed, 2) then
-        -- Only disable controls if player is trying to use weapons
-        for _, control in ipairs(COMBAT_CONTROLS) do
-            DisableControlAction(0, control, true)
-        end
-    end
-end
+local lastPlayerPos = nil -- Cache player position
+local lastFrameTime = 0 -- For throttling operations
+local markerUpdateDue = 0 -- Time-based marker updates
+local playerPed = nil -- Cache player ped
+local playerCoords = nil -- Cache player coordinates
+local frameCounter = 0 -- For staggering operations
 
 -- Create a more efficient notification function
 function SendNotification(title, message, type, duration)
     lib.notify({
-        id = title .. message .. GetGameTimer(),
+        id = title .. message,
         title = title,
         description = message,
         type = type or 'info',
@@ -189,68 +181,37 @@ Citizen.CreateThread(function()
         table.insert(cleaningSpots, spot)
     end
     
+    -- Initialize cached player data
+    playerPed = PlayerPedId()
+    playerCoords = GetEntityCoords(playerPed)
+    
     DebugPrint('Client initialized with ' .. #cleaningSpots .. ' cleaning spots')
 end)
 
--- Event to start community service
-RegisterNetEvent('zcs:startService')
-AddEventHandler('zcs:startService', function(spotCount)
-    inService = true
-    tasksRemaining = spotCount
-    isProcessingTask = false
-    taskRequestQueued = false
-    
-    -- Teleport to service location
-    local ped = PlayerPedId()
-    SetEntityCoords(ped, Locations.ServiceLocation.x, Locations.ServiceLocation.y, Locations.ServiceLocation.z)
-    
-    -- Display UI notification
-    SendNotification('Community Service', _('service_started', spotCount), 'info', 7000)
-    
-    -- Show persistent UI
-    lib.showTextUI(_('remaining_tasks', tasksRemaining), {
-        position = "top-center",
-        icon = 'hammer',
-        style = {
-            borderRadius = 5,
-            backgroundColor = '#1E1E2E',
-            color = 'white'
-        }
-    })
-    
-    -- Request a new task after a short delay
-    Citizen.SetTimeout(500, function()
-        if not taskRequestQueued and inService then
-            taskRequestQueued = true
-            TriggerServerEvent('zcs:requestTask')
-        end
-    end)
-    
-    -- Start boundary check thread if not already running
-    if not boundaryThread then
-        StartBoundaryCheckThread()
-    end
-end)
-
--- Optimize the boundary check thread to use less resources
+-- Optimize boundary check function with adaptive timing
 function StartBoundaryCheckThread()
     boundaryThread = Citizen.CreateThread(function()
         local warningShown = false
         local warningCooldown = 0
-        local checkInterval = 1000 -- Check every second
+        local checkInterval = 2000 -- Start with 2 seconds
         local restrictedCenter = vector3(
             Locations.RestrictedArea.center.x, 
             Locations.RestrictedArea.center.y, 
             Locations.RestrictedArea.center.z
         )
         local restrictedRadius = Locations.RestrictedArea.radius
+        local lastDistance = 0
         
         while inService do
-            local playerPed = PlayerPedId()
-            local playerCoords = GetEntityCoords(playerPed)
-            
-            -- Calculate distance from center of restricted area
+            -- Use cached player coordinates when possible
             local distance = #(playerCoords - restrictedCenter)
+            
+            -- Adaptive timing - check more frequently when near boundary
+            if math.abs(distance - restrictedRadius) < 20.0 then
+                checkInterval = 1000 -- Check more often when near boundary
+            else
+                checkInterval = 3000 -- Check less often when far from boundary
+            end
             
             -- If player is outside the boundary
             if distance > restrictedRadius then
@@ -264,24 +225,22 @@ function StartBoundaryCheckThread()
                 -- If player is in a vehicle, remove them from it
                 if IsPedInAnyVehicle(playerPed, false) then
                     TaskLeaveVehicle(playerPed, GetVehiclePedIsIn(playerPed, false), 16)
-                    Citizen.Wait(500) -- Wait for player to exit vehicle
+                    Wait(500) -- Wait for player to exit vehicle
                 end
                 
                 -- Teleport back to service location
                 SetEntityCoords(playerPed, Locations.ServiceLocation.x, Locations.ServiceLocation.y, Locations.ServiceLocation.z)
                 
-                -- Also notify server for logging
-                TriggerServerEvent('zcs:checkPlayerArea', playerCoords)
+                -- Only notify server if significantly outside boundary (saves network traffic)
+                if distance > restrictedRadius + 20.0 then
+                    TriggerServerEvent('zcs:checkPlayerArea', playerCoords)
+                end
             else
                 warningShown = false
             end
             
-            -- Also handle combat controls here instead of a separate thread
-            if inService then
-                DisableCombatControls()
-            end
-            
-            Citizen.Wait(checkInterval)
+            lastDistance = distance
+            Wait(checkInterval)
         end
         
         boundaryThread = nil
@@ -296,6 +255,13 @@ function ClearAllTargetZones()
             activeTargetZones[zoneId] = nil
         end
     end
+    
+    -- Ensure we have an empty table (except for retrieval point)
+    local newActiveZones = {}
+    if activeTargetZones['zcs_retrieval_point'] then
+        newActiveZones['zcs_retrieval_point'] = true
+    end
+    activeTargetZones = newActiveZones
 end
 
 -- Receive a cleaning task from server
@@ -316,7 +282,7 @@ AddEventHandler('zcs:receiveTask', function(spotIndex, spot, taskTypeName)
     ClearAllTargetZones()
     
     -- Wait a moment to ensure all zones are properly cleared
-    Citizen.Wait(500)
+    Wait(500)
     
     if tasksRemaining <= 0 then
         isProcessingTask = false
@@ -363,8 +329,10 @@ AddEventHandler('zcs:receiveTask', function(spotIndex, spot, taskTypeName)
     EndTextCommandSetBlipName(blip)
     table.insert(blips, blip)
     
+    -- Generate a unique ID for this specific task instance
+    local uniqueTaskId = 'zcs_cleaning_' .. spotIndex .. '_' .. GetGameTimer()
+    
     -- Create target zones with increased size and unique ID
-    local targetId = 'zcs_cleaning_' .. spotIndex
     exports.ox_target:addBoxZone({
         coords = vec3(spot.x, spot.y, spot.z),
         size = vec3(2.5, 2.5, 3.0), -- Increased size
@@ -372,7 +340,7 @@ AddEventHandler('zcs:receiveTask', function(spotIndex, spot, taskTypeName)
         debug = Config.Debug,
         options = {
             {
-                name = targetId,
+                name = uniqueTaskId,
                 icon = taskType.icon,
                 label = taskType.label,
                 onSelect = function()
@@ -382,8 +350,8 @@ AddEventHandler('zcs:receiveTask', function(spotIndex, spot, taskTypeName)
         }
     })
     
-    -- Add to active zones tracking
-    activeTargetZones[targetId] = true
+    -- Add to active zones tracking with the unique ID
+    activeTargetZones[uniqueTaskId] = true
     
     -- Create a marker thread with optimized performance
     if not markerThread then
@@ -397,39 +365,131 @@ AddEventHandler('zcs:receiveTask', function(spotIndex, spot, taskTypeName)
     isProcessingTask = false
 end)
 
--- Optimize the marker thread to use less resources
+-- Modify the zcs:startService event to start the combat prevention thread
+RegisterNetEvent('zcs:startService')
+AddEventHandler('zcs:startService', function(spotCount)
+    inService = true
+    tasksRemaining = spotCount
+    isProcessingTask = false
+    taskRequestQueued = false
+    
+    -- Teleport to service location
+    SetEntityCoords(playerPed, Locations.ServiceLocation.x, Locations.ServiceLocation.y, Locations.ServiceLocation.z)
+    
+    -- Display UI notification
+    SendNotification('Community Service', _('service_started', spotCount), 'info', 7000)
+    
+    -- Show persistent UI
+    lib.showTextUI(_('remaining_tasks', tasksRemaining), {
+        position = "top-center",
+        icon = 'hammer',
+        style = {
+            borderRadius = 5,
+            backgroundColor = '#1E1E2E',
+            color = 'white'
+        }
+    })
+    
+    -- Request a new task after a short delay
+    Citizen.SetTimeout(500, function()
+        if not taskRequestQueued and inService then
+            taskRequestQueued = true
+            TriggerServerEvent('zcs:requestTask')
+        end
+    end)
+    
+    -- Start boundary check thread if not already running
+    if not boundaryThread then
+        StartBoundaryCheckThread()
+    end
+    
+    -- Start position update thread
+    StartPositionUpdateThread()
+end)
+
+-- Add a new thread to update player position at a controlled rate
+function StartPositionUpdateThread()
+    Citizen.CreateThread(function()
+        while inService do
+            -- Update cached player data
+            playerPed = PlayerPedId()
+            playerCoords = GetEntityCoords(playerPed)
+            frameCounter = (frameCounter + 1) % 60
+            
+            -- Use a longer wait time to reduce CPU usage
+            Wait(500)
+        end
+    end)
+end
+
+-- Ultra-optimized marker thread
 function StartMarkerThread()
     markerThread = Citizen.CreateThread(function()
-        local markerUpdateInterval = Config.MarkerUpdateInterval or 250
+        local nextMarkerUpdate = 0
         local markerRenderDistance = Config.MarkerRenderDistance or 50.0
         
         while currentCleaningSpot and inService do
-            local playerPed = PlayerPedId()
-            local playerCoords = GetEntityCoords(playerPed)
-            local spot = currentCleaningSpot.spot
-            local spotCoords = vector3(spot.x, spot.y, spot.z)
-            local distance = #(playerCoords - spotCoords)
+            local currentTime = GetGameTimer()
             
-            -- Only draw marker when player is close (within configured distance)
-            if distance < markerRenderDistance then
-                -- Adjust update interval based on distance
-                local updateInterval = distance < 10.0 and 0 or markerUpdateInterval
+            -- Only update markers when due
+            if currentTime >= nextMarkerUpdate then
+                local spot = currentCleaningSpot.spot
+                local spotCoords = vector3(spot.x, spot.y, spot.z)
+                local distance = #(playerCoords - spotCoords)
                 
-                -- Draw a more visible marker
-                DrawMarker(
-                    Config.MarkerType, -- Marker type from config
-                    spot.x, spot.y, spot.z - 0.9, -- Position slightly below ground
-                    0.0, 0.0, 0.0, 
-                    0.0, 0.0, 0.0, 
-                    Config.MarkerSize.x, Config.MarkerSize.y, Config.MarkerSize.z, -- Size from config
-                    Config.MarkerColor.r, Config.MarkerColor.g, Config.MarkerColor.b, Config.MarkerColor.a, -- Color from config
-                    true, false, 2, true, nil, nil, false
-                )
-                
-                Citizen.Wait(updateInterval)
+                -- Only draw marker when player is close (within configured distance)
+                if distance < markerRenderDistance then
+                    -- Adjust update interval based on distance
+                    local updateInterval = distance < 10.0 and 0 or 500
+                    
+                    -- Only draw markers when player is looking in that direction
+                    if distance < 20.0 then
+                        -- Draw only one marker type based on distance to save resources
+                        if distance < 10.0 then
+                            -- Close range - draw both markers but less frequently
+                            if frameCounter % 2 == 0 then
+                                DrawMarker(
+                                    1, -- Vertical cylinder
+                                    spot.x, spot.y, spot.z - 0.9,
+                                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                    1.0, 1.0, 0.5,
+                                    Config.MarkerColor.r, Config.MarkerColor.g, Config.MarkerColor.b, 100,
+                                    false, true, 2, true, nil, nil, false
+                                )
+                            else
+                                -- Alternate frames - draw circle marker
+                                DrawMarker(
+                                    25, -- Thin circle
+                                    spot.x, spot.y, spot.z - 0.95,
+                                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                    1.2, 1.2, 1.2,
+                                    Config.MarkerColor.r, Config.MarkerColor.g, Config.MarkerColor.b, 150,
+                                    false, false, 2, true, nil, nil, false
+                                )
+                            end
+                        else
+                            -- Medium range - draw only one marker
+                            DrawMarker(
+                                1, -- Vertical cylinder
+                                spot.x, spot.y, spot.z - 0.9,
+                                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                                1.0, 1.0, 0.5,
+                                Config.MarkerColor.r, Config.MarkerColor.g, Config.MarkerColor.b, 100,
+                                false, true, 2, true, nil, nil, false
+                            )
+                        end
+                    end
+                    
+                    nextMarkerUpdate = currentTime + updateInterval
+                    Wait(0)
+                else
+                    -- Far away - use a much longer interval
+                    nextMarkerUpdate = currentTime + 1000
+                    Wait(500)
+                end
             else
-                -- Use a longer interval when far away
-                Citizen.Wait(markerUpdateInterval * 2)
+                -- Not time to update yet
+                Wait(100)
             end
         end
         
@@ -481,8 +541,6 @@ function DoCleaningTask(spotIndex, taskType)
     isProcessingTask = true
     
     -- Check if player is close enough to the spot
-    local playerPed = PlayerPedId()
-    local playerCoords = GetEntityCoords(playerPed)
     local spotCoords = vector3(currentCleaningSpot.spot.x, currentCleaningSpot.spot.y, currentCleaningSpot.spot.z)
     local distance = #(playerCoords - spotCoords)
     
@@ -580,11 +638,13 @@ end
 -- Optimize the ClearCurrentCleaningSpot function
 function ClearCurrentCleaningSpot()
     if currentCleaningSpot then
-        -- Remove target zone for this specific spot
-        local targetId = 'zcs_cleaning_' .. currentCleaningSpot.index
-        if activeTargetZones[targetId] then
-            exports.ox_target:removeZone(targetId)
-            activeTargetZones[targetId] = nil
+        -- Find and remove all target zones related to this spot
+        for zoneId, _ in pairs(activeTargetZones) do
+            -- Check if this zone is related to the current cleaning spot
+            if string.find(zoneId, 'zcs_cleaning_' .. currentCleaningSpot.index) then
+                exports.ox_target:removeZone(zoneId)
+                activeTargetZones[zoneId] = nil
+            end
         end
         
         -- Remove blips and clear routes
@@ -600,7 +660,7 @@ function ClearCurrentCleaningSpot()
     end
 end
 
--- Optimize the release from service event
+-- Modify the zcs:releaseFromService event to properly stop combat prevention
 RegisterNetEvent('zcs:releaseFromService')
 AddEventHandler('zcs:releaseFromService', function()
     -- Set flags first to prevent any new tasks
@@ -622,8 +682,7 @@ AddEventHandler('zcs:releaseFromService', function()
     
     -- Teleport to release location after a short delay
     Citizen.SetTimeout(Config.ReleaseDelay, function()
-        local ped = PlayerPedId()
-        SetEntityCoords(ped, Locations.ReleaseLocation.x, Locations.ReleaseLocation.y, Locations.ReleaseLocation.z)
+        SetEntityCoords(playerPed, Locations.ReleaseLocation.x, Locations.ReleaseLocation.y, Locations.ReleaseLocation.z)
         
         SendNotification('Community Service', _('service_completed'), 'success', 7000)
     end)
@@ -633,12 +692,10 @@ end)
 RegisterNetEvent('zcs:teleportBack')
 AddEventHandler('zcs:teleportBack', function()
     if inService then
-        local playerPed = PlayerPedId()
-        
         -- If player is in a vehicle, remove them from it
         if IsPedInAnyVehicle(playerPed, false) then
             TaskLeaveVehicle(playerPed, GetVehiclePedIsIn(playerPed, false), 16)
-            Citizen.Wait(500) -- Wait for player to exit vehicle
+            Wait(500) -- Wait for player to exit vehicle
         end
         
         -- Teleport back to service location
@@ -654,7 +711,7 @@ RegisterCommand('cs', function()
     TriggerServerEvent('zcs:checkPermission')
 end, false)
 
--- Optimize the resource stop handler
+-- Optimize the resource stop handler to properly clean up
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then
         return

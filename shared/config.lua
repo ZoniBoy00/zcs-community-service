@@ -39,15 +39,12 @@ Config.PlayerPositionCheckInterval = 5000 -- ms between position checks
 Config.ShowRestrictedArea = true -- Set to true to show the boundary
 Config.RestrictedAreaColor = {r = 50, g = 150, b = 50, a = 30} -- More subtle green with low transparency
 
--- Add a key binding option
-Config.CleaningKey = 38 -- E key by default
+-- Update marker settings for a more modern look
+Config.MarkerType = 1 -- Vertical cylinder with moving gradient (more modern)
+Config.MarkerColor = {r = 65, g = 220, b = 120, a = 180} -- Brighter green, semi-transparent
+Config.MarkerSize = {x = 1.0, y = 1.0, z = 0.5} -- Slightly larger and flatter for modern look
 
--- Update marker settings
-Config.MarkerType = 21 -- Arrow cylinder
-Config.MarkerColor = {r = 50, g = 200, b = 50, a = 180} -- Light green, semi-transparent
-Config.MarkerSize = {x = 0.8, y = 0.8, z = 0.8}
-
--- Blip settings
+-- Blip settings (map icons)
 Config.CleaningBlipSprite = 280 -- Cleaning cloth icon (more modern)
 Config.CleaningBlipColor = 47 -- Light blue (more visible)
 Config.CleaningBlipScale = 0.7 -- Slightly smaller for cleaner look
@@ -72,9 +69,6 @@ Config.NotificationDebounce = 3000 -- ms between similar notifications
 
 -- Task type settings
 Config.EnableTaskTypeSpecificSpots = true -- If true, each task type will only use its own spots
-
--- Add a new config option for combat restrictions
-Config.DisableCombat = true -- Set to true to disable all combat actions during community service
 
 -- Add a new config option for inventory restrictions during tasks
 Config.DisableInventoryDuringTasks = true -- Set to true to disable inventory access during cleaning tasks
