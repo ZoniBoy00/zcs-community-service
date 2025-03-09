@@ -72,6 +72,10 @@ Locales['en'] = {
   ['progress_weeding'] = 'Removing weeds...',
   ['progress_scrubbing'] = 'Scrubbing the surface...',
   ['progress_pickingtrash'] = 'Collecting trash...',
+
+  -- Add new locale entries for the combat and inventory restrictions
+  ['combat_disabled'] = 'You cannot fight while in community service',
+  ['inventory_disabled'] = 'You cannot access your inventory while cleaning',
 }
 
 Locales['fi'] = {
@@ -146,5 +150,9 @@ Locales['fi'] = {
   ['progress_weeding'] = 'Poistetaan rikkaruohoja...',
   ['progress_scrubbing'] = 'Hangataan pintaa...',
   ['progress_pickingtrash'] = 'Kerätään roskia...',
+
+  -- Add the same entries for Finnish
+  ['combat_disabled'] = 'Et voi taistella yhdyskuntapalvelun aikana',
+  ['inventory_disabled'] = 'Et voi käyttää tavaraluetteloasi siivouksen aikana',
 }
 

@@ -1,5 +1,5 @@
 -- Discord webhook logging system
-local webhookUrl = 'https://discordapp.com/api/webhooks/ZCS_Community_Service' -- Replace with your actual Discord webhook URL
+local webhookUrl = 'https://discord.com/api/webhooks/your-webhook-url-here' -- Replace with your actual Discord webhook URL
 
 -- Function to send Discord webhook
 local function SendDiscordLog(title, description, color, fields)

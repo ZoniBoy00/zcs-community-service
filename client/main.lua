@@ -5,33 +5,7 @@ local lastNotifications = {}
 local activeTargetZones = {} -- Track all active target zones
 local isProcessingTask = false -- Flag to prevent multiple task processing
 local taskRequestQueued = false -- Flag to prevent multiple task requests
-
--- Create a more robust debounced notification function
-function SendNotification(title, message, type, duration)
-    -- Create a more unique key that includes the message type, source, and timestamp
-    local notifKey = title .. message .. (type or "info") .. GetGameTimer()
-    
-    -- Send the notification
-    lib.notify({
-        id = notifKey, -- Use a unique ID for each notification
-        title = title,
-        description = message,
-        type = type or 'info',
-        duration = duration or 5000,
-        position = 'top-right' -- Consistent position
-    })
-end
-
--- Debug function - only executes if debug is enabled
-function DebugPrint(message)
-    -- Use a safe check for Config.Debug that won't error if Config is nil
-    if Config and Config.Debug then
-        print('[ZCS Debug] ' .. message)
-    end
-end
-
--- Initialize variables
-ESX = exports['es_extended']:getSharedObject()
+local combatControlsThread = nil
 local inService = false
 local tasksRemaining = 0
 local currentCleaningSpot = nil
@@ -39,8 +13,56 @@ local cleaningSpots = {}
 local blips = {}
 local markerThread = nil
 local boundaryThread = nil
+local lastCombatControlTime = 0
+local combatControlInterval = 100 -- Check combat controls every 100ms instead of every frame
 
--- Task types and their animations - improved animations and props
+-- Pre-cache frequently used values
+local COMBAT_CONTROLS = {
+    24, 25, 47, 58, 140, 141, 142, 143, 263, 264, 257, 37, 
+    157, 158, 160, 164, 165, 159, 161, 162, 163
+}
+
+-- Function to disable combat controls - optimized to run less frequently
+function DisableCombatControls()
+    local currentTime = GetGameTimer()
+    if currentTime - lastCombatControlTime < combatControlInterval then
+        return -- Skip if we checked recently
+    end
+    
+    lastCombatControlTime = currentTime
+    
+    -- Check if player is trying to use a weapon before disabling controls
+    local playerPed = PlayerPedId()
+    if IsPedArmed(playerPed, 4) or IsPedArmed(playerPed, 1) or IsPedArmed(playerPed, 2) then
+        -- Only disable controls if player is trying to use weapons
+        for _, control in ipairs(COMBAT_CONTROLS) do
+            DisableControlAction(0, control, true)
+        end
+    end
+end
+
+-- Create a more efficient notification function
+function SendNotification(title, message, type, duration)
+    lib.notify({
+        id = title .. message .. GetGameTimer(),
+        title = title,
+        description = message,
+        type = type or 'info',
+        duration = duration or 5000
+    })
+end
+
+-- Debug function - only executes if debug is enabled
+function DebugPrint(message)
+    if Config and Config.Debug then
+        print('[ZCS Debug] ' .. message)
+    end
+end
+
+-- Initialize variables
+ESX = exports['es_extended']:getSharedObject()
+
+-- Cache task types to avoid recreating them
 local taskTypes = {
     {
         name = "Sweeping",
@@ -85,7 +107,7 @@ local taskTypes = {
         progressLabel = _('progress_scrubbing')
     },
     {
-        name = "Picking Trash",
+        name = "PickingTrash",
         label = _('label_pickingtrash'),
         icon = "fas fa-trash",
         dict = "anim@amb@drug_field_workers@rake@male_a@base", 
@@ -110,7 +132,6 @@ if not _ then
                 if success then
                     return result
                 else
-                    -- If formatting fails, return the unformatted string
                     return Locales[Config.Locale][str]
                 end
             else
@@ -121,7 +142,7 @@ if not _ then
     end
 end
 
--- Initialize client side
+-- Initialize client side - optimized to reduce redundant operations
 Citizen.CreateThread(function()
     -- Pre-load all animation dictionaries in the background
     for _, task in ipairs(taskTypes) do
@@ -163,8 +184,7 @@ Citizen.CreateThread(function()
     -- Add to active zones
     activeTargetZones[retrievalZoneId] = true
     
-    -- Load cleaning spots from config based on the task type
-    -- This ensures we have a reference to all spots for compatibility
+    -- Load cleaning spots from config based on the task type - only once at startup
     for _, spot in ipairs(Locations.CleaningSpots) do
         table.insert(cleaningSpots, spot)
     end
@@ -212,22 +232,28 @@ AddEventHandler('zcs:startService', function(spotCount)
     end
 end)
 
--- Start the boundary check thread
+-- Optimize the boundary check thread to use less resources
 function StartBoundaryCheckThread()
     boundaryThread = Citizen.CreateThread(function()
         local warningShown = false
         local warningCooldown = 0
+        local checkInterval = 1000 -- Check every second
+        local restrictedCenter = vector3(
+            Locations.RestrictedArea.center.x, 
+            Locations.RestrictedArea.center.y, 
+            Locations.RestrictedArea.center.z
+        )
+        local restrictedRadius = Locations.RestrictedArea.radius
         
         while inService do
             local playerPed = PlayerPedId()
             local playerCoords = GetEntityCoords(playerPed)
             
             -- Calculate distance from center of restricted area
-            local distance = #(vector3(playerCoords.x, playerCoords.y, playerCoords.z) - 
-                           vector3(Locations.RestrictedArea.center.x, Locations.RestrictedArea.center.y, Locations.RestrictedArea.center.z))
+            local distance = #(playerCoords - restrictedCenter)
             
             -- If player is outside the boundary
-            if distance > Locations.RestrictedArea.radius then
+            if distance > restrictedRadius then
                 -- Show warning if not recently shown
                 if not warningShown and GetGameTimer() > warningCooldown then
                     SendNotification('Community Service', _('leaving_area_warning'), 'error', 3000)
@@ -250,20 +276,23 @@ function StartBoundaryCheckThread()
                 warningShown = false
             end
             
-            Citizen.Wait(1000) -- Check every second
+            -- Also handle combat controls here instead of a separate thread
+            if inService then
+                DisableCombatControls()
+            end
+            
+            Citizen.Wait(checkInterval)
         end
         
         boundaryThread = nil
     end)
 end
 
--- Completely clear all target zones
+-- Completely clear all target zones - optimized to reduce redundant operations
 function ClearAllTargetZones()
-    -- Remove all active target zones
     for zoneId, _ in pairs(activeTargetZones) do
         if zoneId ~= 'zcs_retrieval_point' then -- Don't remove the retrieval point
             exports.ox_target:removeZone(zoneId)
-            DebugPrint('Removed target zone: ' .. zoneId)
             activeTargetZones[zoneId] = nil
         end
     end
@@ -277,7 +306,6 @@ AddEventHandler('zcs:receiveTask', function(spotIndex, spot, taskTypeName)
     
     -- Prevent processing multiple tasks simultaneously
     if isProcessingTask then
-        DebugPrint('Already processing a task, ignoring new task request')
         return
     end
     
@@ -295,7 +323,7 @@ AddEventHandler('zcs:receiveTask', function(spotIndex, spot, taskTypeName)
         return
     end
     
-    -- Find the task type by name
+    -- Find the task type by name - optimize with direct lookup
     local taskType
     for _, task in ipairs(taskTypes) do
         if task.name == taskTypeName then
@@ -365,24 +393,28 @@ AddEventHandler('zcs:receiveTask', function(spotIndex, spot, taskTypeName)
     -- Notify player
     SendNotification('Community Service', _('new_task', taskType.name), 'info', 5000)
     
-    DebugPrint('Received task at spot ' .. spotIndex .. ' (' .. spot.x .. ', ' .. spot.y .. ', ' .. spot.z .. ')')
-    
     -- Reset processing flag
     isProcessingTask = false
 end)
 
--- Start the marker thread with optimized performance
+-- Optimize the marker thread to use less resources
 function StartMarkerThread()
     markerThread = Citizen.CreateThread(function()
+        local markerUpdateInterval = Config.MarkerUpdateInterval or 250
+        local markerRenderDistance = Config.MarkerRenderDistance or 50.0
+        
         while currentCleaningSpot and inService do
             local playerPed = PlayerPedId()
             local playerCoords = GetEntityCoords(playerPed)
             local spot = currentCleaningSpot.spot
-            local distance = #(vector3(playerCoords.x, playerCoords.y, playerCoords.z) - 
-                             vector3(spot.x, spot.y, spot.z))
+            local spotCoords = vector3(spot.x, spot.y, spot.z)
+            local distance = #(playerCoords - spotCoords)
             
             -- Only draw marker when player is close (within configured distance)
-            if distance < Config.MarkerRenderDistance then
+            if distance < markerRenderDistance then
+                -- Adjust update interval based on distance
+                local updateInterval = distance < 10.0 and 0 or markerUpdateInterval
+                
                 -- Draw a more visible marker
                 DrawMarker(
                     Config.MarkerType, -- Marker type from config
@@ -393,9 +425,11 @@ function StartMarkerThread()
                     Config.MarkerColor.r, Config.MarkerColor.g, Config.MarkerColor.b, Config.MarkerColor.a, -- Color from config
                     true, false, 2, true, nil, nil, false
                 )
-                Citizen.Wait(0) -- Update every frame when close
+                
+                Citizen.Wait(updateInterval)
             else
-                Citizen.Wait(Config.MarkerUpdateInterval) -- Use configured interval when far away
+                -- Use a longer interval when far away
+                Citizen.Wait(markerUpdateInterval * 2)
             end
         end
         
@@ -406,7 +440,6 @@ end
 -- Event to update task count
 RegisterNetEvent('zcs:updateTaskCount')
 AddEventHandler('zcs:updateTaskCount', function(newCount)
-    DebugPrint('Updating task count to: ' .. newCount)
     tasksRemaining = newCount
     
     -- Update the UI with the new count
@@ -424,11 +457,9 @@ AddEventHandler('zcs:updateTaskCount', function(newCount)
     
     -- If no current cleaning spot, request a new one after a short delay
     if not currentCleaningSpot and not taskRequestQueued then
-        DebugPrint('No current cleaning spot, requesting new task')
         -- Use a longer delay to ensure server has time to process
         Citizen.SetTimeout(Config.TaskAssignmentDelay, function()
             if not isProcessingTask and not taskRequestQueued and inService and tasksRemaining > 0 then
-                DebugPrint('Requesting new task after task completion')
                 taskRequestQueued = true
                 TriggerServerEvent('zcs:requestTask')
             end
@@ -436,22 +467,18 @@ AddEventHandler('zcs:updateTaskCount', function(newCount)
     end
 end)
 
--- Improved function to handle the cleaning task animation and completion
+-- Optimize the DoCleaningTask function
 function DoCleaningTask(spotIndex, taskType)
     if not currentCleaningSpot or not inService then
-        DebugPrint('Cannot do cleaning task: not in service or no current spot')
         return
     end
     
     -- Prevent multiple simultaneous task processing
     if isProcessingTask then
-        DebugPrint('Already processing a task, ignoring new task request')
         return
     end
     
     isProcessingTask = true
-    
-    DebugPrint('Starting cleaning task: ' .. spotIndex)
     
     -- Check if player is close enough to the spot
     local playerPed = PlayerPedId()
@@ -464,6 +491,10 @@ function DoCleaningTask(spotIndex, taskType)
         isProcessingTask = false
         return
     end
+    
+    -- Disable inventory and target systems using events
+    TriggerEvent('ox_inventory:disableInventory', true)
+    TriggerEvent('ox_target:disableTargeting', true)
     
     -- Make sure the animation dictionary is loaded
     if not HasAnimDictLoaded(taskType.dict) then
@@ -488,11 +519,10 @@ function DoCleaningTask(spotIndex, taskType)
     -- Start the animation with better parameters
     TaskPlayAnim(playerPed, taskType.dict, taskType.anim, 8.0, -8.0, -1, 49, 0, false, false, false)
     
-    -- Common progress options
+    -- Progress bar or circle based on configuration
     local progressOptions = {
-        duration = Config.ProgressDuration or 10000,
+        duration = Config.ProgressDuration,
         label = taskType.progressLabel,
-        position = 'bottom',
         useWhileDead = false,
         canCancel = true,
         disable = {
@@ -507,14 +537,12 @@ function DoCleaningTask(spotIndex, taskType)
         }
     }
     
-    local success = false
-    
-    -- Use the appropriate progress type based on config
+    -- Add circle type if configured
     if Config and Config.ProgressStyle == 'circle' then
-        success = lib.progressCircle(progressOptions)
-    else
-        success = lib.progressBar(progressOptions)
+        progressOptions.type = 'circle'
     end
+    
+    local success = lib.progressBar(progressOptions)
     
     -- Clear animation and prop
     ClearPedTasks(playerPed)
@@ -523,16 +551,17 @@ function DoCleaningTask(spotIndex, taskType)
         DeleteEntity(prop)
     end
     
+    -- Re-enable inventory and target systems
+    TriggerEvent('ox_inventory:disableInventory', false)
+    TriggerEvent('ox_target:disableTargeting', false)
+    
     if not success then
         SendNotification('Community Service', _('cleaning_interrupted'), 'error')
         isProcessingTask = false
         return
     end
     
-    -- Complete the task
-    DebugPrint('Completing task: ' .. spotIndex)
-    
-    -- Store the current spot index and task type before clearing
+    -- Complete the task - store values before clearing
     local completedSpotIndex = currentCleaningSpot.index
     local completedTaskType = currentCleaningSpot.taskType.name
     
@@ -545,11 +574,10 @@ function DoCleaningTask(spotIndex, taskType)
     -- Reset processing flag after a short delay
     Citizen.SetTimeout(1000, function()
         isProcessingTask = false
-        DebugPrint('Task processing flag reset')
     end)
 end
 
--- Clear current cleaning spot
+-- Optimize the ClearCurrentCleaningSpot function
 function ClearCurrentCleaningSpot()
     if currentCleaningSpot then
         -- Remove target zone for this specific spot
@@ -557,7 +585,6 @@ function ClearCurrentCleaningSpot()
         if activeTargetZones[targetId] then
             exports.ox_target:removeZone(targetId)
             activeTargetZones[targetId] = nil
-            DebugPrint('Removed target zone: ' .. targetId)
         end
         
         -- Remove blips and clear routes
@@ -573,11 +600,9 @@ function ClearCurrentCleaningSpot()
     end
 end
 
--- Event to release from service
+-- Optimize the release from service event
 RegisterNetEvent('zcs:releaseFromService')
 AddEventHandler('zcs:releaseFromService', function()
-    DebugPrint('Received release from service event')
-    
     -- Set flags first to prevent any new tasks
     inService = false
     tasksRemaining = 0
@@ -591,13 +616,16 @@ AddEventHandler('zcs:releaseFromService', function()
     -- Hide the UI
     lib.hideTextUI()
     
+    -- Make sure inventory and target are enabled when released
+    TriggerEvent('ox_inventory:disableInventory', false)
+    TriggerEvent('ox_target:disableTargeting', false)
+    
     -- Teleport to release location after a short delay
     Citizen.SetTimeout(Config.ReleaseDelay, function()
         local ped = PlayerPedId()
         SetEntityCoords(ped, Locations.ReleaseLocation.x, Locations.ReleaseLocation.y, Locations.ReleaseLocation.z)
         
         SendNotification('Community Service', _('service_completed'), 'success', 7000)
-        DebugPrint('Player released from service and teleported')
     end)
 end)
 
@@ -626,7 +654,7 @@ RegisterCommand('cs', function()
     TriggerServerEvent('zcs:checkPermission')
 end, false)
 
--- Clean up on resource stop
+-- Optimize the resource stop handler
 AddEventHandler('onResourceStop', function(resourceName)
     if GetCurrentResourceName() ~= resourceName then
         return
@@ -647,11 +675,13 @@ AddEventHandler('onResourceStop', function(resourceName)
         lib.hideTextUI()
     end
     
+    -- Make sure inventory and target are enabled when resource stops
+    TriggerEvent('ox_inventory:disableInventory', false)
+    TriggerEvent('ox_target:disableTargeting', false)
+    
     -- Reset all flags
     inService = false
     isProcessingTask = false
     taskRequestQueued = false
-    
-    DebugPrint('Resource stopped, cleaned up all resources')
 end)
 

@@ -73,6 +73,12 @@ Config.NotificationDebounce = 3000 -- ms between similar notifications
 -- Task type settings
 Config.EnableTaskTypeSpecificSpots = true -- If true, each task type will only use its own spots
 
+-- Add a new config option for combat restrictions
+Config.DisableCombat = true -- Set to true to disable all combat actions during community service
+
+-- Add a new config option for inventory restrictions during tasks
+Config.DisableInventoryDuringTasks = true -- Set to true to disable inventory access during cleaning tasks
+
 -- Function to translate text with error handling
 function _(str, ...)
 local args = {...}
