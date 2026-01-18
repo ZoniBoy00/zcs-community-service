@@ -1,25 +1,11 @@
--- Define a local translation function in case the global one isn't available
-local function _(str, ...)
-    local args = {...}
-    if Locales[Config.Locale] and Locales[Config.Locale][str] then
-        -- Check if we have any arguments before formatting
-        if #args > 0 then
-            return string.format(Locales[Config.Locale][str], ...)
-        else
-            -- Return the string without formatting if no arguments provided
-            return Locales[Config.Locale][str]
-        end
-    end
-    return 'Translation missing: ' .. str
-end
+-- Community Service Menu System (Powered by ox_lib)
 
--- Community Service Menu System
-
--- Function to get all online players for the menu
 local function GetOnlinePlayers()
     local players = {}
+    local activePlayers = GetActivePlayers()
     
-    for _, id in ipairs(GetActivePlayers()) do
+    for i = 1, #activePlayers do
+        local id = activePlayers[i]
         local serverId = GetPlayerServerId(id)
         local name = GetPlayerName(id)
         
@@ -32,7 +18,6 @@ local function GetOnlinePlayers()
         end
     end
     
-    -- Sort by ID
     table.sort(players, function(a, b)
         return a.id < b.id
     end)
@@ -40,7 +25,6 @@ local function GetOnlinePlayers()
     return players
 end
 
--- Open the task count input menu
 local function OpenTaskCountMenu(playerId, action)
     lib.registerContext({
         id = 'zcs_task_count',
@@ -49,15 +33,14 @@ local function OpenTaskCountMenu(playerId, action)
         options = {
             {
                 title = string.format(_('menu_player_id'), playerId),
-                description = '',
                 disabled = true
             },
             {
                 title = _('menu_confirm'),
-                description = '',
+                icon = 'check',
                 onSelect = function()
                     local input = lib.inputDialog(_('menu_enter_tasks'), {
-                        {type = 'number', label = 'Task Count', default = 5, min = 1, max = 100}
+                        {type = 'number', label = 'Task Count', default = 5, min = 1, max = 1000}
                     })
                     
                     if input and input[1] and input[1] > 0 then
@@ -67,8 +50,7 @@ local function OpenTaskCountMenu(playerId, action)
                             TriggerServerEvent('zcs:addTasks', playerId, input[1])
                         end
                     end
-                end,
-                icon = 'check'
+                end
             }
         }
     })
@@ -76,18 +58,16 @@ local function OpenTaskCountMenu(playerId, action)
     lib.showContext('zcs_task_count')
 end
 
--- Forward declaration for OpenMainMenu
-local OpenMainMenu
+local OpenMainMenu -- Forward declaration
 
--- Open the player selection menu
 local function OpenPlayerSelectionMenu(action)
     local players = GetOnlinePlayers()
     local options = {}
     
-    for _, player in ipairs(players) do
+    for i = 1, #players do
+        local player = players[i]
         table.insert(options, {
             title = player.label,
-            description = '',
             onSelect = function()
                 if action == 'assign' or action == 'add' then
                     OpenTaskCountMenu(player.id, action)
@@ -100,14 +80,12 @@ local function OpenPlayerSelectionMenu(action)
         })
     end
     
-    -- Add a cancel option
     table.insert(options, {
         title = _('menu_cancel'),
-        description = '',
+        icon = 'xmark',
         onSelect = function()
             OpenMainMenu()
-        end,
-        icon = 'xmark'
+        end
     })
     
     lib.registerContext({
@@ -120,7 +98,6 @@ local function OpenPlayerSelectionMenu(action)
     lib.showContext('zcs_player_selection')
 end
 
--- Open the self-service menu for testing
 local function OpenSelfServiceMenu()
     lib.registerContext({
         id = 'zcs_self_service',
@@ -130,6 +107,7 @@ local function OpenSelfServiceMenu()
             {
                 title = _('menu_assign'),
                 description = 'Put yourself in community service for testing',
+                icon = 'user-lock',
                 onSelect = function()
                     local input = lib.inputDialog(_('menu_self_service'), {
                         {type = 'number', label = 'Task Count', default = 5, min = 1, max = 20}
@@ -138,16 +116,15 @@ local function OpenSelfServiceMenu()
                     if input and input[1] and input[1] > 0 then
                         TriggerServerEvent('zcs:selfService', input[1])
                     end
-                end,
-                icon = 'user-lock'
+                end
             },
             {
                 title = _('menu_release'),
                 description = 'Release yourself from community service',
+                icon = 'user-check',
                 onSelect = function()
                     TriggerServerEvent('zcs:releaseSelf')
-                end,
-                icon = 'user-check'
+                end
             }
         }
     })
@@ -155,61 +132,43 @@ local function OpenSelfServiceMenu()
     lib.showContext('zcs_self_service')
 end
 
--- Open the main community service menu
 OpenMainMenu = function()
     local options = {
         {
             title = _('menu_assign'),
-            description = '',
-            onSelect = function()
-                OpenPlayerSelectionMenu('assign')
-            end,
-            icon = 'handcuffs'
+            icon = 'handcuffs',
+            onSelect = function() OpenPlayerSelectionMenu('assign') end
         },
         {
             title = _('menu_check_status'),
-            description = '',
-            onSelect = function()
-                OpenPlayerSelectionMenu('status')
-            end,
-            icon = 'magnifying-glass'
+            icon = 'magnifying-glass',
+            onSelect = function() OpenPlayerSelectionMenu('status') end
         },
         {
             title = _('menu_release'),
-            description = '',
-            onSelect = function()
-                OpenPlayerSelectionMenu('release')
-            end,
-            icon = 'unlock'
+            icon = 'unlock',
+            onSelect = function() OpenPlayerSelectionMenu('release') end
         },
         {
             title = _('menu_add_tasks'),
-            description = '',
-            onSelect = function()
-                OpenPlayerSelectionMenu('add')
-            end,
-            icon = 'plus'
+            icon = 'plus',
+            onSelect = function() OpenPlayerSelectionMenu('add') end
         }
     }
     
-    -- Only add the test menu option if enabled in config
     if Config.EnableTestMenu then
         table.insert(options, {
             title = _('menu_self_service'),
-            description = 'Put yourself in community service for testing',
-            onSelect = function()
-                OpenSelfServiceMenu()
-            end,
-            icon = 'vial'
+            description = 'Testing tools',
+            icon = 'vial',
+            onSelect = OpenSelfServiceMenu
         })
     end
     
-    -- Add close button
     table.insert(options, {
         title = _('menu_close'),
-        description = '',
-        onSelect = function() end,
-        icon = 'xmark'
+        icon = 'xmark',
+        onSelect = function() end
     })
     
     lib.registerContext({
@@ -221,39 +180,28 @@ OpenMainMenu = function()
     lib.showContext('zcs_main_menu')
 end
 
--- Register the command to open the menu
 RegisterCommand('communityservice', function()
-    -- Check permission on server side
     TriggerServerEvent('zcs:checkPermission')
 end, false)
 
--- Register shorthand command
 RegisterCommand('cs', function()
-    -- Check permission on server side
     TriggerServerEvent('zcs:checkPermission')
 end, false)
 
--- Register testing command (only if test menu is enabled)
 if Config.EnableTestMenu then
     RegisterCommand('cs_test', function()
         OpenSelfServiceMenu()
     end, false)
 end
 
--- Event to open menu after permission check
-RegisterNetEvent('zcs:openMenu')
-AddEventHandler('zcs:openMenu', function()
+RegisterNetEvent('zcs:openMenu', function()
     OpenMainMenu()
 end)
 
--- Event to open self-service menu
-RegisterNetEvent('zcs:openSelfServiceMenu')
-AddEventHandler('zcs:openSelfServiceMenu', function()
+RegisterNetEvent('zcs:openSelfServiceMenu', function()
     if Config.EnableTestMenu then
         OpenSelfServiceMenu()
     else
-        -- If test menu is disabled, show a notification
         SendNotification('Community Service', 'Test menu is disabled in the configuration', 'error')
     end
 end)
-

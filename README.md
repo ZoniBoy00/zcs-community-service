@@ -1,16 +1,19 @@
-# 🚔 zcs-community-service
+# 🚔 zcs-community-service (QBox Version)
 
-### A FiveM script for assigning community service tasks as an alternative to jail time.
+### A modern, highly optimized FiveM script for assigning community service tasks as an alternative to jail time. Optimized for QBox Framework.
 
 ---
 
 ## 🌟 Features
-✅ Assign community service tasks instead of jail time  
-✅ Configurable task system with progress tracking  
-✅ Supports multiple languages (English & Finnish)  
-✅ Customizable task locations and durations  
-✅ Discord logging for tracking player punishments  
-✅ Optimized and lightweight for smooth server performance  
+✅ **QBox Integrated:** Native support for QBox Framework and CitizenID.  
+✅ **Ox Support:** Built with `ox_lib`, `ox_target`, and `ox_inventory` for maximum efficiency.  
+✅ **Service Persistence:** Service state is saved in the database. Players will resume their tasks automatically after rejoining or script restarts.  
+✅ **Localized Tasks:** All task labels and progress bars are fully translatable via `locales.lua`. Supports English and Finnish.  
+✅ **Task System:** Multiple interactive tasks (Sweeping, Weeding, Scrubbing, Trash Picking) with custom animations and props.  
+✅ **Smart Security:** Built-in protection against event spamming, teleportation, and position spoofing.  
+✅ **Discord Logging:** Detailed webhooks for assignments, completions, and suspicious activity.  
+✅ **Inventory Storage:** Automatic confiscation and recovery of belongings.  
+✅ **Optimized Codebase:** Combined threads and `.await` based database calls for minimal overhead (~0.00ms idle).
 
 ---
 
@@ -27,71 +30,64 @@
   ```
 
 ### 3️⃣ Install Database
-- Import the `install.sql` file into your database to set up necessary tables.
+- Import the `install.sql` file into your database to set up community service tracking tables.
 
 ### 4️⃣ Configure Settings
-- Open `shared/config.lua` and customize the following:
-  - `Debug = false` (Disable debug mode in production)
-  - `EnableTestMenu = false` (Disable test menu for players)
-  - `Locale = 'en'` (Choose language: `'en'` for English, `'fi'` for Finnish)
-  - `PoliceJobName = 'police'` (Set your police job name)
-  - `ProgressStyle = 'bar'` (Choose progress display style: `'bar'` or `'circle'`)
-  - `ProgressDuration = 5000` (Task duration in milliseconds)
-  - `TaskCooldown = 10000` (Cooldown between tasks in milliseconds)
+- Open `shared/config.lua` and customize:
+  - `Locale = 'en'` (Choose language: `'en'` or `'fi'`)
+  - `PoliceJobName = 'police'` 
+  - `MinimumPoliceGrade = 0`
+  - `ProgressDuration = 10000`
+  - `TaskCooldown = 5000` (Security measure between tasks)
 
 ### 5️⃣ Configure Discord Logs (Optional)
-- Open `server/discord_logs.lua` and set up your Discord Webhook for logging player punishments.
+- Open `server/discord_logs.lua` and set up your Discord Webhook URL.
 
 ---
 
 ## 📌 Requirements
+- **Framework:** [QBox](https://github.com/Qbox-project/qbx_core)
 - **Dependencies:**
-  - [`ox_lib`](https://github.com/overextended/ox_lib/releases/latest)
-  - [`ox_target`](https://github.com/overextended/ox_target/releases/latest)
-  - [`ox_inventory`](https://github.com/overextended/ox_inventory/releases/latest)
-  - [`oxmysql`](https://github.com/overextended/oxmysql/releases/latest)
+  - [`ox_lib`](https://github.com/overextended/ox_lib)
+  - [`ox_target`](https://github.com/overextended/ox_target)
+  - [`ox_inventory`](https://github.com/overextended/ox_inventory)
+  - [`oxmysql`](https://github.com/overextended/oxmysql)
 
 ---
 
 ## 🎮 How to Use
 
 ### 👮 Assigning Community Service
-- Police officers can assign community service using the following method:
-  1. **Command:**
-     - Use the command:
-       ```
-       /cs
-       ```
-     - This opens a menu where officers can select a player and assign them to community service.
+- Police officers can assign community service using the command:
+  1. **Command:** `/cs` or `/communityservice`.
+  2. **Menu:** Choose an online player and specify the amount of tasks.
 
 ### 🧹 Completing Tasks
-- Players will be sent to the community service location.
-- They must complete their assigned tasks (e.g., sweeping, cleaning).
-- Progress is tracked, and they will be released once all tasks are completed.
+- Players are teleported to the service area and must complete tasks using target interaction points.
+- A Text UI displays remaining tasks at the top of the screen.
+- After all tasks are completed, the player is automatically released and teleported back.
 
 ### 🎒 Retrieving Belongings
-- After completing community service, players can retrieve their confiscated items at the designated retrieval point.
+- After release, players can visit the **Retrieval Point** (marked on the map) to reclaim their items.
 
 ---
 
 ## ⚙️ Configuration
 
 ### 🌍 Localization
-- Modify `shared/locales.lua` to add or edit language translations.
+- All text strings are located in `shared/locales.lua`.
 
 ### 📍 Task & Service Locations
-- Adjust task positions and service locations in `shared/locations.lua`.
-- Customize spawn points, task areas, and retrieval zones to match your server layout.
+- Positions for the service area, release point, and individual task spots are in `shared/locations.lua`.
 
 ---
 
 ## 📜 License
-This project is licensed under the **MIT License**. You are free to modify and use it as you see fit. See the [LICENSE](https://github.com/ZoniBoy00/zcs-community-service/blob/main/LICENSE) file for more details.
+This project is licensed under the **MIT License**.
 
 ---
 
 ## 💡 Credits
-Developed by **ZoniBoy00**. Contributions & feedback are always welcome!
+Developed and optimized by **ZoniBoy00**. Remastered for the QBox Ecosystem.
 
-🚀 **Enhance your RP server with zcs-community-service today!**
-
+🚀 **Enhance your roleplay experience with a modern community service system!**

@@ -1,180 +1,92 @@
--- Server-side script specifically for handling inventory management
--- Optimized for performance and reliability
+-- Inventory management for Community Service (QBox)
 
--- Add reference to the notification debounce function if it's not accessible from main.lua
-if not SendClientNotification then
-    local lastNotifications = {}
-    
-    function SendClientNotification(source, title, message, type, duration)
-        -- Generate a unique key for this notification
-        local notifKey = source .. title .. message .. (type or "info") .. GetGameTimer()
-        
-        -- Send the notification to the client with a unique ID
-        TriggerClientEvent('ox_lib:notify', source, {
-            id = notifKey,
-            title = title,
-            description = message,
-            type = type or 'info',
-            duration = duration or 5000,
-            position = 'top-right' -- Consistent position
-        })
+-- Safe local reference to global DebugPrint
+local function DebugPrint(msg)
+    if _G.DebugPrint then _G.DebugPrint(msg) end
+end
+
+-- Utility for notifications (fallback)
+local function Notify(source, title, description, type)
+    if SendClientNotification then
+        SendClientNotification(source, title, description, type)
+    else
+        TriggerClientEvent('ox_lib:notify', source, { title = title, description = description, type = type or 'info' })
     end
 end
 
--- Debug function - only executes if debug is enabled
-function DebugPrint(message)
-    -- Use a safe check for Config.Debug that won't error if Config is nil
-    if Config and Config.Debug then
-        print('[ZCS] ' .. message)
-    end
-end
-
--- Store player inventory in database (optimized)
-function StorePlayerInventory(xPlayer)
-    local identifier = xPlayer.getIdentifier()
-    local source = xPlayer.source
-    local playerName = GetPlayerName(source)
-    local items = exports.ox_inventory:GetInventoryItems(source)
+-- Store inventory before service starts
+function StorePlayerInventory(source, citizenid)
+    local inventory = exports.ox_inventory:GetInventory(source)
+    local items = inventory and inventory.items
     
-    if not items or #items == 0 then 
-        DebugPrint('No items to store for player ' .. playerName)
+    if not items or not next(items) then 
+        DebugPrint('Player ' .. GetPlayerName(source) .. ' has a truly empty inventory.')
         return 
     end
     
-    -- Check if player already has stored items to prevent duplicates
-    MySQL.Async.fetchScalar('SELECT COUNT(*) FROM community_service_inventory WHERE identifier = @identifier', {
-        ['@identifier'] = identifier
-    }, function(count)
-        if count and count > 0 then
-            DebugPrint('Player ' .. playerName .. ' already has stored items. Skipping storage.')
-            return
+    -- Check for existing storage to avoid overwriting or duplicates
+    local existing = MySQL.scalar.await('SELECT COUNT(*) FROM community_service_inventory WHERE citizenid = ?', {citizenid})
+    if existing and existing > 0 then
+        DebugPrint('Player ' .. GetPlayerName(source) .. ' already has stored items. Clearing inventory to prevent bringing items to service.')
+        exports.ox_inventory:ClearInventory(source)
+        return
+    end
+    
+    local success = MySQL.insert.await('INSERT INTO community_service_inventory (citizenid, items) VALUES (?, ?)', {citizenid, json.encode(items)})
+    
+    if success then
+        -- Aggressive clearing
+        exports.ox_inventory:ClearInventory(source)
+        
+        -- Double check and force remove if anything remains (like weapons)
+        Wait(500)
+        local remaining = exports.ox_inventory:GetInventory(source).items
+        if remaining and next(remaining) then
+            for _, item in pairs(remaining) do
+                exports.ox_inventory:RemoveItem(source, item.name, item.count)
+            end
         end
         
-        -- Convert items to JSON string
-        local itemsJson = json.encode(items)
+        DebugPrint('Inventory SECURELY stored and cleared for ' .. GetPlayerName(source))
+    else
+        DebugPrint('CRITICAL ERROR: Failed to store inventory for ' .. GetPlayerName(source))
+    end
+end
+
+-- Restore inventory after service completion
+function RestorePlayerInventory(source, citizenid)
+    local itemsJson = MySQL.scalar.await('SELECT items FROM community_service_inventory WHERE citizenid = ? ORDER BY storage_date DESC LIMIT 1', {citizenid})
+    
+    if itemsJson then
+        local items = json.decode(itemsJson)
         
-        -- Store in database (optimized query)
-        MySQL.Async.execute('INSERT INTO community_service_inventory (identifier, items) VALUES (@identifier, @items)', {
-            ['@identifier'] = identifier,
-            ['@items'] = itemsJson
-        }, function()
-            -- Log each item being taken with ox_inventory's logging system
+        SetTimeout(1000, function()
             for _, item in pairs(items) do
                 if item.name and item.count then
-                    -- Use ox_inventory's built-in logging for each item
-                    exports.ox_inventory:RemoveItem(source, item.name, item.count, item.metadata, true, 
-                        function(success, reason)
-                            if not success and Config.Debug then
-                                print('[ZCS] Failed to remove item ' .. item.name .. ' from player ' .. playerName .. ': ' .. reason)
-                            end
-                        end
-                    )
+                    exports.ox_inventory:AddItem(source, item.name, item.count, item.metadata)
                 end
             end
             
-            -- Clear player inventory after logging each item
-            exports.ox_inventory:ClearInventory(source, true)
-            
-            DebugPrint('Stored inventory for player ' .. playerName)
-        end)
-    end)
-end
-
--- Restore player inventory from database (optimized)
-function RestorePlayerInventory(xPlayer)
-    local identifier = xPlayer.getIdentifier()
-    local source = xPlayer.source
-    local playerName = GetPlayerName(source)
-    
-    -- Add a flag to prevent duplicate processing
-    if not xPlayer.retrievingBelongings then
-        xPlayer.retrievingBelongings = true
-        
-        -- Optimized query to get only the most recent inventory
-        MySQL.Async.fetchScalar('SELECT items FROM community_service_inventory WHERE identifier = @identifier ORDER BY storage_date DESC LIMIT 1', {
-            ['@identifier'] = identifier
-        }, function(items)
-            if items then
-                local itemsData = json.decode(items)
-                
-                -- Wait a bit to ensure player is ready
-                SetTimeout(1000, function()
-                    -- Give back the items with proper logging
-                    for _, item in pairs(itemsData) do
-                        if item.name and item.count then
-                            -- Use ox_inventory's built-in logging for each item
-                            exports.ox_inventory:AddItem(source, item.name, item.count, item.metadata, nil, 
-                                function(success, response)
-                                    if not success and Config.Debug then
-                                        print('[ZCS] Failed to add item ' .. item.name .. ' to player ' .. playerName .. ': ' .. response)
-                                    end
-                                end
-                            )
-                        end
-                    end
-                    
-                    -- Delete the stored inventory
-                    MySQL.Async.execute('DELETE FROM community_service_inventory WHERE identifier = @identifier', {
-                        ['@identifier'] = identifier
-                    })
-                    
-                    -- Log to Discord
-                    LogBelongingsRetrieved(playerName, identifier)
-                    
-                    SendClientNotification(source, 'Community Service', _('belongings_returned'), 'success', 5000)
-                    
-                    DebugPrint('Restored inventory for player ' .. playerName)
-                    
-                    -- Reset the flag after a delay
-                    SetTimeout(5000, function()
-                        xPlayer.retrievingBelongings = nil
-                    end)
-                end)
-            else
-                SendClientNotification(source, 'Community Service', _('no_belongings'), 'error', 5000)
-                
-                -- Reset the flag immediately
-                xPlayer.retrievingBelongings = nil
-            end
+            MySQL.query('DELETE FROM community_service_inventory WHERE citizenid = ?', {citizenid})
+            LogBelongingsRetrieved(GetPlayerName(source), citizenid)
+            Notify(source, 'Community Service', _('belongings_returned'), 'success')
         end)
     else
-        DebugPrint('Player ' .. playerName .. ' is already retrieving belongings. Ignoring duplicate request.')
+        Notify(source, 'Community Service', _('no_belongings'), 'error')
     end
 end
 
--- Request to retrieve stored belongings
-RegisterNetEvent('zcs:retrieveBelongings')
-AddEventHandler('zcs:retrieveBelongings', function()
+RegisterNetEvent('zcs:retrieveBelongings', function()
     local source = source
-    local xPlayer = ESX.GetPlayerFromId(source)
+    local player = exports.qbx_core:GetPlayer(source)
+    local playerData = player and player.PlayerData
+    if not playerData or IsEventSpamming(source, 'zcs:retrieveBelongings') then return end
     
-    if not xPlayer then return end
-    
-    -- Security: Check for event spamming
-    if IsEventSpamming(source, 'zcs:retrieveBelongings') then
+    local citizenid = playerData.citizenid
+    if playersInService[citizenid] then
+        Notify(source, 'Community Service', _('not_in_service'), 'error')
         return
     end
     
-    -- Process the retrieval
-    local identifier = xPlayer.getIdentifier()
-    
-    -- Check if player is in service (shouldn't be able to retrieve while in service)
-    if playersInService[identifier] then
-        SendClientNotification(source, 'Community Service', _('not_in_service'), 'error')
-        return
-    end
-    
-    -- Check if player has stored inventory
-    MySQL.Async.fetchScalar('SELECT COUNT(*) FROM community_service_inventory WHERE identifier = @identifier', {
-        ['@identifier'] = identifier
-    }, function(count)
-        if count and count > 0 then
-            -- Player has stored items, restore them
-            RestorePlayerInventory(xPlayer)
-        else
-            -- No stored items found
-            SendClientNotification(source, 'Community Service', _('no_belongings'), 'error')
-        end
-    end)
+    RestorePlayerInventory(source, citizenid)
 end)
-

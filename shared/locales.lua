@@ -6,6 +6,7 @@ Locales['en'] = {
   ['service_completed'] = 'You have completed your community service',
   ['task_completed'] = 'Task completed. Remaining: %s',
   ['remaining_tasks'] = 'Community Service: %s tasks remaining',
+  ['service_rejoined'] = 'You have %s community service tasks remaining',
   ['service_extended'] = 'Your community service has been extended by %s tasks',
   
   -- Task messages
@@ -80,6 +81,7 @@ Locales['fi'] = {
   ['service_completed'] = 'Olet suorittanut yhdyskuntapalvelusi',
   ['task_completed'] = 'Tehtävä suoritettu. Jäljellä: %s',
   ['remaining_tasks'] = 'Yhdyskuntapalvelu: %s tehtävää jäljellä',
+  ['service_rejoined'] = 'Sinulla on %s yhdyskuntapalvelutehtävää jäljellä',
   ['service_extended'] = 'Yhdyskuntapalveluasi on pidennetty %s tehtävällä',
   
   -- Task messages

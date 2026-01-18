@@ -1,624 +1,348 @@
--- Optimized server-side script with improved performance
+-- Optimized server-side logic for Community Service (QBox)
+local function GetPlayerData(id)
+    local p = exports.qbx_core:GetPlayer(id)
+    return p and p.PlayerData
+end
 
--- Notification debounce system
-local lastNotifications = {}
-local processingTasks = {} -- Track which players are currently processing tasks
-local releaseInProgress = {} -- Track players being released to prevent duplicate releases
+-- State Tracking
+local processingTasks = {}
+local releaseInProgress = {}
+playersInService = {} -- Global for security verification
+local playerTasks = {}
+local playerLastTaskTime = {}
 
--- Initialize variables
-ESX = exports['es_extended']:getSharedObject()
-playersInService = {} -- Make this global so it can be accessed from other files
-local playerTasks = {} -- Track current task for each player
-local playerLastTaskTime = {} -- Track last task completion time for rate limiting
-
--- Add task types definition at the top of the file, after the variables initialization
--- Task types for server-side reference
-local taskTypes = {
-    {name = "Sweeping"},
-    {name = "Weeding"},
-    {name = "Scrubbing"},
-    {name = "PickingTrash"}
-}
-
--- Create a more robust debounced notification function
-function SendClientNotification(source, title, message, type, duration)
-    -- Generate a more unique key for this notification
-    local notifKey = source .. title .. message .. (type or "info") .. GetGameTimer()
-    
-    -- Send the notification to the client with a unique ID
+-- Standardized notification sender
+local function SendClientNotification(source, title, message, type, duration)
     TriggerClientEvent('ox_lib:notify', source, {
-        id = notifKey,
         title = title,
         description = message,
         type = type or 'info',
         duration = duration or 5000,
-        position = 'top-right' -- Consistent position
+        position = 'top-right'
     })
 end
 
--- Debug function - only executes if debug is enabled
 function DebugPrint(message)
-    -- Use a safe check for Config.Debug that won't error if Config is nil
     if Config and Config.Debug then
-        print('[ZCS] ' .. message)
+        print('^2[ZCS Debug]^0 ' .. message)
     end
 end
 
--- Initialize database tables on resource start
+-- Database initialization
 MySQL.ready(function()
-    MySQL.Async.execute([[
+    MySQL.query([[
         CREATE TABLE IF NOT EXISTS `community_service` (
-            `identifier` varchar(60) NOT NULL,
+            `citizenid` varchar(50) NOT NULL,
             `spots_assigned` int(11) NOT NULL,
             `spots_remaining` int(11) NOT NULL,
-            PRIMARY KEY (`identifier`)
+            PRIMARY KEY (`citizenid`)
         )
-    ]], {}, function()
-        print('[ZCS] Community Service database initialized.')
-    end)
+    ]])
     
-    MySQL.Async.execute([[
+    MySQL.query([[
         CREATE TABLE IF NOT EXISTS `community_service_inventory` (
             `id` int(11) NOT NULL AUTO_INCREMENT,
-            `identifier` varchar(60) NOT NULL,
+            `citizenid` varchar(50) NOT NULL,
             `items` longtext,
             `storage_date` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (`id`)
         )
-    ]], {}, function()
-        print('[ZCS] Community Service inventory database initialized.')
-    end)
+    ]])
     
-    -- Load active service players (optimized query)
-    MySQL.Async.fetchAll('SELECT identifier, spots_remaining FROM community_service', {}, function(results)
+    local results = MySQL.query.await('SELECT citizenid, spots_remaining FROM community_service')
+    if results then
         for _, data in ipairs(results) do
-            playersInService[data.identifier] = data.spots_remaining
+            playersInService[data.citizenid] = data.spots_remaining
         end
-        print('[ZCS] Loaded ' .. #results .. ' players in community service')
-    end)
+        print('^2[ZCS]^0 Loaded ' .. #results .. ' players in community service')
+    end
 end)
 
--- Check if player has permission to use community service commands
-RegisterNetEvent('zcs:checkPermission')
-AddEventHandler('zcs:checkPermission', function()
+RegisterNetEvent('zcs:checkInitialService', function()
     local source = source
-    local xPlayer = ESX.GetPlayerFromId(source)
+    local playerData = GetPlayerData(source)
+    if not playerData then return end
+
+    local citizenid = playerData.citizenid
+    if playersInService[citizenid] then
+        DebugPrint('Player ' .. GetPlayerName(source) .. ' rejoined and is still in service.')
+        TriggerClientEvent('zcs:startService', source, playersInService[citizenid])
+        SendClientNotification(source, 'Community Service', _('service_rejoined', playersInService[citizenid]), 'info', 7000)
+    else
+        DebugPrint('Player ' .. GetPlayerName(source) .. ' checked initial service but is not in the list.')
+    end
+end)
+
+
+RegisterNetEvent('zcs:checkPermission', function()
+    local source = source
+    local playerData = GetPlayerData(source)
     
-    if HasPermission(xPlayer) then
+    if HasPermission(playerData) then
         TriggerClientEvent('zcs:openMenu', source)
     else
         SendClientNotification(source, 'Community Service', _('no_permission'), 'error')
     end
 end)
 
--- Self-service for testing
-RegisterNetEvent('zcs:selfService')
-AddEventHandler('zcs:selfService', function(spotCount)
-    local source = source
-    local xPlayer = ESX.GetPlayerFromId(source)
-    
-    if not xPlayer then return end
-    
-    local identifier = xPlayer.getIdentifier()
-    
-    -- Store the player's inventory
-    StorePlayerInventory(xPlayer)
-    
-    -- Register the player in the database (single operation)
-    MySQL.Async.execute('INSERT INTO community_service (identifier, spots_assigned, spots_remaining) VALUES (@identifier, @spots, @spots) ON DUPLICATE KEY UPDATE spots_assigned = @spots, spots_remaining = @spots', {
-        ['@identifier'] = identifier,
-        ['@spots'] = spotCount
-    }, function()
-        playersInService[identifier] = spotCount
-        
-        -- Teleport player to service location and notify
-        TriggerClientEvent('zcs:startService', source, spotCount)
-        SendClientNotification(source, 'Community Service', _('service_started', spotCount), 'info', 7000)
-        
-        DebugPrint('Player ' .. GetPlayerName(source) .. ' put themselves in community service with ' .. spotCount .. ' tasks')
-    end)
-end)
-
--- Self-release for testing
-RegisterNetEvent('zcs:releaseSelf')
-AddEventHandler('zcs:releaseSelf', function()
-    local source = source
-    local xPlayer = ESX.GetPlayerFromId(source)
-    
-    if not xPlayer then return end
-    
-    local identifier = xPlayer.getIdentifier()
-    
-    if not playersInService[identifier] then
-        SendClientNotification(source, 'Community Service', _('not_in_service'), 'error')
-        return
+-- Service Assignment Logic
+local function AssignService(source, targetSource, spotCount, isSelf)
+    local playerData = GetPlayerData(targetSource)
+    if not playerData then 
+        DebugPrint('FAILED to assign service: Player data not found for target ' .. tostring(targetSource))
+        return 
     end
     
-    -- Release the player
-    ReleaseFromService(xPlayer)
+    local citizenid = playerData.citizenid
+    StorePlayerInventory(targetSource, citizenid)
     
-    DebugPrint('Player ' .. GetPlayerName(source) .. ' released themselves from community service')
+    DebugPrint('Assigning ' .. spotCount .. ' tasks to ' .. GetPlayerName(targetSource) .. ' (' .. citizenid .. ')')
+    
+    local success = MySQL.query.await('INSERT INTO community_service (citizenid, spots_assigned, spots_remaining) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE spots_assigned = ?, spots_remaining = ?', 
+        {citizenid, spotCount, spotCount, spotCount, spotCount})
+    
+    if success then
+        playersInService[citizenid] = spotCount
+        
+        -- Start client service
+        TriggerClientEvent('zcs:startService', targetSource, spotCount)
+        SendClientNotification(targetSource, 'Community Service', _('service_started', spotCount), 'info', 7000)
+        
+        if not isSelf then
+            local officerData = GetPlayerData(source)
+            SendClientNotification(source, 'Community Service', _('player_sent', spotCount), 'success')
+            LogServiceAssignment(GetPlayerName(source), officerData and officerData.citizenid or "Unknown", GetPlayerName(targetSource), citizenid, spotCount)
+        end
+        
+        DebugPrint('Successfully assigned service to ' .. GetPlayerName(targetSource))
+    else
+        DebugPrint('DATABASE ERROR: Failed to insert/update community_service for ' .. citizenid)
+    end
+end
+
+RegisterNetEvent('zcs:selfService', function(spotCount)
+    AssignService(source, source, spotCount, true)
 end)
 
--- Register a player for community service
-RegisterNetEvent('zcs:sendToService')
-AddEventHandler('zcs:sendToService', function(target, spotCount)
+RegisterNetEvent('zcs:sendToService', function(target, spotCount)
     local source = source
-    local xPlayer = ESX.GetPlayerFromId(source)
-    local tPlayer = ESX.GetPlayerFromId(target)
+    local officerData = GetPlayerData(source)
     
-    -- Security: Verify police permissions
-    if not HasPermission(xPlayer) then
+    if not HasPermission(officerData) then
         SendClientNotification(source, 'Community Service', _('no_permission'), 'error')
         return
     end
     
-    if not tPlayer then
+    AssignService(source, target, spotCount, false)
+end)
+
+RegisterNetEvent('zcs:addTasks', function(target, addCount)
+    local source = source
+    local officerData = GetPlayerData(source)
+    local targetData = GetPlayerData(target)
+    
+    if not HasPermission(officerData) then
+        SendClientNotification(source, 'Community Service', _('no_permission'), 'error')
+        return
+    end
+    
+    if not targetData then
         SendClientNotification(source, 'Community Service', _('player_not_found'), 'error')
         return
     end
     
-    local identifier = tPlayer.getIdentifier()
+    local citizenid = targetData.citizenid
     
-    -- Store the player's inventory
-    StorePlayerInventory(tPlayer)
-    
-    -- Register the player in the database (optimized query with single operation)
-    MySQL.Async.execute('INSERT INTO community_service (identifier, spots_assigned, spots_remaining) VALUES (@identifier, @spots, @spots) ON DUPLICATE KEY UPDATE spots_assigned = @spots, spots_remaining = @spots', {
-        ['@identifier'] = identifier,
-        ['@spots'] = spotCount
-    }, function()
-        playersInService[identifier] = spotCount
-        
-        -- Teleport player to service location and notify
-        TriggerClientEvent('zcs:startService', target, spotCount)
-        SendClientNotification(target, 'Community Service', _('service_started', spotCount), 'info', 7000)
-        
-        -- Notify the officer
-        SendClientNotification(source, 'Community Service', _('player_sent', spotCount), 'success')
-        
-        -- Log to Discord
-        LogServiceAssignment(
-            GetPlayerName(source),
-            xPlayer.getIdentifier(),
-            GetPlayerName(target),
-            identifier,
-            spotCount
-        )
-    end)
-end)
-
--- Register shorthand command for ease of use
-RegisterCommand('cs', function(source)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    
-    -- Check permission directly here
-    if HasPermission(xPlayer) then
-        TriggerClientEvent('zcs:openMenu', source)
-    else
-        SendClientNotification(source, 'Community Service', _('no_permission'), 'error')
-    end
-end, false)
-
--- Register the full command as well
-RegisterCommand('communityservice', function(source)
-    local xPlayer = ESX.GetPlayerFromId(source)
-    
-    -- Check permission directly here
-    if HasPermission(xPlayer) then
-        TriggerClientEvent('zcs:openMenu', source)
-    else
-        SendClientNotification(source, 'Community Service', _('no_permission'), 'error')
-    end
-end, false)
-
--- Register testing command
-RegisterCommand('cs_test', function(source)
-    TriggerClientEvent('zcs:openSelfServiceMenu', source)
-end, false)
-
--- Add tasks to a player's service
-RegisterNetEvent('zcs:addTasks')
-AddEventHandler('zcs:addTasks', function(target, addCount)
-    local source = source
-    local xPlayer = ESX.GetPlayerFromId(source)
-    local tPlayer = ESX.GetPlayerFromId(target)
-    
-    -- Security: Verify police permissions
-    if not HasPermission(xPlayer) then
-        SendClientNotification(source, 'Community Service', _('no_permission'), 'error')
+    if not playersInService[citizenid] then
+        AssignService(source, target, addCount, false)
         return
     end
     
-    if not tPlayer then
-        SendClientNotification(source, 'Community Service', _('player_not_found'), 'error')
-        return
-    end
+    local newCount = playersInService[citizenid] + addCount
+    playersInService[citizenid] = newCount
     
-    local identifier = tPlayer.getIdentifier()
+    MySQL.query('UPDATE community_service SET spots_assigned = spots_assigned + ?, spots_remaining = spots_remaining + ? WHERE citizenid = ?', 
+        {addCount, addCount, citizenid})
     
-    if not playersInService[identifier] then
-        -- Player not in service, assign new service
-        TriggerEvent('zcs:sendToService', target, addCount)
-        return
-    end
+    LogTasksAdded(GetPlayerName(source), officerData.citizenid, GetPlayerName(target), citizenid, addCount, newCount)
     
-    -- Add more tasks to existing service
-    local newCount = playersInService[identifier] + addCount
-    playersInService[identifier] = newCount
-    
-    -- Update database (optimized query)
-    MySQL.Async.execute('UPDATE community_service SET spots_assigned = spots_assigned + @add_count, spots_remaining = spots_remaining + @add_count WHERE identifier = @identifier', {
-        ['@identifier'] = identifier,
-        ['@add_count'] = addCount
-    })
-    
-    -- Log to Discord
-    LogTasksAdded(
-        GetPlayerName(source),
-        xPlayer.getIdentifier(),
-        GetPlayerName(target),
-        identifier,
-        addCount,
-        newCount
-    )
-    
-    -- Notify player and officer
     TriggerClientEvent('zcs:updateTaskCount', target, newCount)
     SendClientNotification(target, 'Community Service', _('service_extended', addCount), 'info', 7000)
-    
     SendClientNotification(source, 'Community Service', _('added_tasks', addCount), 'success')
 end)
 
--- Check player status
-RegisterNetEvent('zcs:checkPlayerStatus')
-AddEventHandler('zcs:checkPlayerStatus', function(target)
+RegisterNetEvent('zcs:checkPlayerStatus', function(target)
     local source = source
-    local xPlayer = ESX.GetPlayerFromId(source)
-    local tPlayer = ESX.GetPlayerFromId(target)
+    local officerData = GetPlayerData(source)
+    if not HasPermission(officerData) then return end
     
-    -- Security: Verify police permissions
-    if not HasPermission(xPlayer) then
-        SendClientNotification(source, 'Community Service', _('no_permission'), 'error')
-        return
-    end
+    local targetData = GetPlayerData(target)
+    if not targetData then return end
     
-    if not tPlayer then
-        SendClientNotification(source, 'Community Service', _('player_not_found'), 'error')
-        return
-    end
-    
-    local identifier = tPlayer.getIdentifier()
-    
-    if not playersInService[identifier] then
+    local citizenid = targetData.citizenid
+    if not playersInService[citizenid] then
         SendClientNotification(source, 'Community Service', _('player_not_in_service'), 'info')
         return
     end
     
-    -- Show player's status with proper formatting
-    local statusMessage = string.format(_('player_status'), GetPlayerName(target), playersInService[identifier])
-    SendClientNotification(source, 'Community Service Status', statusMessage, 'info', 5000)
-    
-    DebugPrint('Officer ' .. GetPlayerName(source) .. ' checked status of ' .. GetPlayerName(target) .. ': ' .. playersInService[identifier] .. ' tasks remaining')
+    local statusMessage = string.format(_('player_status'), GetPlayerName(target), playersInService[citizenid])
+    SendClientNotification(source, 'Status', statusMessage, 'info')
 end)
 
--- Release a player from community service
-RegisterNetEvent('zcs:releasePlayer')
-AddEventHandler('zcs:releasePlayer', function(target)
+RegisterNetEvent('zcs:releasePlayer', function(target)
     local source = source
-    local xPlayer = ESX.GetPlayerFromId(source)
-    local tPlayer = ESX.GetPlayerFromId(target)
+    local officerData = GetPlayerData(source)
+    if not HasPermission(officerData) then return end
     
-    -- Security: Verify police permissions
-    if not HasPermission(xPlayer) then
-        SendClientNotification(source, 'Community Service', _('no_permission'), 'error')
-        return
-    end
+    local targetData = GetPlayerData(target)
+    if not targetData then return end
     
-    if not tPlayer then
-        SendClientNotification(source, 'Community Service', _('player_not_found'), 'error')
-        return
-    end
+    local citizenid = targetData.citizenid
+    if not playersInService[citizenid] then return end
     
-    local identifier = tPlayer.getIdentifier()
+    local remainingTasks = playersInService[citizenid]
+    ReleaseFromService(target, citizenid)
     
-    if not playersInService[identifier] then
-        SendClientNotification(source, 'Community Service', _('player_not_in_service'), 'info')
-        return
-    end
-    
-    -- Get remaining tasks for logging
-    local remainingTasks = playersInService[identifier]
-    
-    -- Release the player
-    ReleaseFromService(tPlayer)
-    
-    -- Notify the officer
     SendClientNotification(source, 'Community Service', _('player_released'), 'success')
-    
-    -- Log to Discord
-    LogForceRelease(
-        GetPlayerName(source),
-        xPlayer.getIdentifier(),
-        GetPlayerName(target),
-        identifier,
-        remainingTasks
-    )
+    LogForceRelease(GetPlayerName(source), officerData.citizenid, GetPlayerName(target), citizenid, remainingTasks)
 end)
 
--- Update the task request handler to support task-specific locations
+RegisterNetEvent('zcs:releaseSelf', function()
+    local player = exports.qbx_core:GetPlayer(source)
+    local playerData = player and player.PlayerData
+    if not playerData or not playersInService[playerData.citizenid] then return end
+    ReleaseFromService(source, playerData.citizenid)
+end)
 
--- Assign a cleaning task to player
-RegisterNetEvent('zcs:requestTask')
-AddEventHandler('zcs:requestTask', function()
+-- Task Handling
+RegisterNetEvent('zcs:requestTask', function()
     local source = source
-    local xPlayer = ESX.GetPlayerFromId(source)
-    local identifier = xPlayer.getIdentifier()
+    local playerData = GetPlayerData(source)
+    if not playerData then return end
+    local citizenid = playerData.citizenid
     
-    -- Security: Verify player is in service
-    if not playersInService[identifier] then
-        SendClientNotification(source, 'Community Service', _('not_in_service'), 'error')
-        return
+    if not playersInService[citizenid] then 
+        DebugPrint('Request rejected: ' .. GetPlayerName(source) .. ' not in service list.')
+        return 
     end
     
-    -- Check if player is already processing a task
-    if processingTasks[identifier] then
-        DebugPrint('Player ' .. GetPlayerName(source) .. ' is already processing a task. Ignoring request.')
-        return
-    end
+    if processingTasks[citizenid] then return end
+    if IsEventSpamming(source, 'zcs:requestTask') then return end
     
-    -- Security: Check for event spamming
-    if IsEventSpamming(source, 'zcs:requestTask') then
-        return
-    end
+    processingTasks[citizenid] = true
     
-    -- Mark player as processing a task
-    processingTasks[identifier] = true
+    -- Pick a random task type
+    local types = {"Sweeping", "Weeding", "Scrubbing", "PickingTrash"}
+    local taskType = types[math.random(1, #types)]
     
-    -- Select a random task type
-    local taskTypeIndex = math.random(1, #taskTypes)
-    local taskTypeName = taskTypes[taskTypeIndex].name
-    
-    -- If task-specific spots are enabled, get spots only for this task type
-    local spots = {}
-    local spotIndex = 0
-    local spot = nil
-    
-    if Config.EnableTaskTypeSpecificSpots and Locations.TaskSpots and Locations.TaskSpots[taskTypeName] then
-        -- Get spots for this specific task type
-        spots = Locations.TaskSpots[taskTypeName]
-        if #spots > 0 then
-            -- Select a random spot from this task type's spots
-            local randomIndex = math.random(1, #spots)
-            spot = spots[randomIndex]
-            spotIndex = randomIndex
-            DebugPrint('Assigned task ' .. taskTypeName .. ' at specific spot ' .. spotIndex)
-        else
-            -- Fallback to generic spots if task-specific spots are empty
-            spotIndex = math.random(1, #Locations.CleaningSpots)
-            spot = Locations.CleaningSpots[spotIndex]
-            DebugPrint('No specific spots for ' .. taskTypeName .. ', using generic spot ' .. spotIndex)
-        end
+    local spotIndex, spot
+    if Config.EnableTaskTypeSpecificSpots and Locations.TaskSpots[taskType] then
+        local spots = Locations.TaskSpots[taskType]
+        spotIndex = math.random(1, #spots)
+        spot = spots[spotIndex]
     else
-        -- Use generic spots
         spotIndex = math.random(1, #Locations.CleaningSpots)
         spot = Locations.CleaningSpots[spotIndex]
-        DebugPrint('Using generic spot ' .. spotIndex .. ' for task ' .. taskTypeName)
     end
     
-    -- Store the assigned task
-    playerTasks[identifier] = {
-        index = spotIndex,
-        position = spot,
-        taskType = taskTypeName
-    }
+    if not spot then
+        DebugPrint('CRITICAL: No spot found for task ' .. taskType)
+        processingTasks[citizenid] = nil
+        return
+    end
     
-    DebugPrint('Assigning task ' .. spotIndex .. ' to player ' .. GetPlayerName(source))
+    playerTasks[citizenid] = { index = spotIndex, position = spot, taskType = taskType }
+    TriggerClientEvent('zcs:receiveTask', source, spotIndex, spot, taskType)
+    DebugPrint('Sent task ' .. taskType .. ' to ' .. GetPlayerName(source))
     
-    -- Send task to client with the task type name
-    TriggerClientEvent('zcs:receiveTask', source, spotIndex, spot, taskTypeName)
-    
-    -- Reset processing flag after a delay
-    Citizen.SetTimeout(2000, function()
-        processingTasks[identifier] = nil
-    end)
+    SetTimeout(1000, function() processingTasks[citizenid] = nil end)
 end)
 
--- Update the completeTask event handler to save and respect task type
-RegisterNetEvent('zcs:completeTask')
-AddEventHandler('zcs:completeTask', function(spotIndex, taskTypeName)
+RegisterNetEvent('zcs:completeTask', function(spotIndex, taskType)
     local source = source
-    local xPlayer = ESX.GetPlayerFromId(source)
-    local identifier = xPlayer.getIdentifier()
+    local playerData = GetPlayerData(source)
+    if not playerData then return end
+    local citizenid = playerData.citizenid
     
-    DebugPrint('Player ' .. GetPlayerName(source) .. ' attempting to complete task ' .. spotIndex .. ' (' .. (taskTypeName or "unknown") .. ')')
+    if not playersInService[citizenid] or processingTasks[citizenid] then return end
+    if IsEventSpamming(source, 'zcs:completeTask') then return end
     
-    -- Security: Verify player is in service
-    if not playersInService[identifier] then
-        SendClientNotification(source, 'Community Service', _('not_in_service'), 'error')
-        return
-    end
-    
-    -- Check if player is already processing a task
-    if processingTasks[identifier] then
-        DebugPrint('Player ' .. GetPlayerName(source) .. ' is already processing a task. Ignoring completion request.')
-        return
-    end
-    
-    -- Mark player as processing a task
-    processingTasks[identifier] = true
-    
-    -- Security: Check for event spamming
-    if IsEventSpamming(source, 'zcs:completeTask') then
-        processingTasks[identifier] = nil
-        return
-    end
-    
-    -- Rate limiting
-    local currentTime = GetGameTimer()
-    if playerLastTaskTime[identifier] and (currentTime - playerLastTaskTime[identifier]) < Config.TaskCooldown then
+    -- Rate limit check
+    local now = GetGameTimer()
+    if playerLastTaskTime[citizenid] and (now - playerLastTaskTime[citizenid]) < (Config.TaskCooldown or 5000) then
         SendClientNotification(source, 'Community Service', _('cleaning_interrupted'), 'error')
-        processingTasks[identifier] = nil
         return
     end
-    playerLastTaskTime[identifier] = currentTime
+    playerLastTaskTime[citizenid] = now
     
-    -- Security: Verify this is the assigned task - more lenient check
-    if not playerTasks[identifier] or playerTasks[identifier].index ~= spotIndex then
-        -- Just log it but allow completion
-        DebugPrint('Warning: Player ' .. GetPlayerName(source) .. ' completed task #' .. spotIndex .. 
-                  ' but was assigned #' .. (playerTasks[identifier] and playerTasks[identifier].index or "none") .. 
-                  '. Allowing completion anyway.')
+    -- Security position check
+    if Config.SecurityEnabled and Config.StrictPositionCheck then
+        if not VerifyPlayerPosition(source, playerTasks[citizenid].position) then
+            SendClientNotification(source, 'Community Service', _('cleaning_interrupted'), 'error')
+            return
+        end
     end
     
-    -- Verify task type if provided
-    if taskTypeName and playerTasks[identifier] and playerTasks[identifier].taskType and 
-       playerTasks[identifier].taskType ~= taskTypeName then
-        DebugPrint('Warning: Player ' .. GetPlayerName(source) .. ' completed task type ' .. taskTypeName .. 
-                  ' but was assigned ' .. playerTasks[identifier].taskType .. '. Allowing completion anyway.')
-    end
+    processingTasks[citizenid] = true
+    local newCount = playersInService[citizenid] - 1
+    playersInService[citizenid] = newCount
     
-    -- Security: Verify player position - make this optional based on config
-    if Config.SecurityEnabled and Config.StrictPositionCheck and not VerifyPlayerPosition(source, playerTasks[identifier].position) then
-        SendClientNotification(source, 'Community Service', _('cleaning_interrupted'), 'error')
-        processingTasks[identifier] = nil
-        return
-    end
+    MySQL.query.await('UPDATE community_service SET spots_remaining = ? WHERE citizenid = ?', {newCount, citizenid})
+    SendClientNotification(source, 'Community Service', _('task_completed', newCount), 'success')
     
-    -- Decrement remaining tasks
-    playersInService[identifier] = playersInService[identifier] - 1
+    playerTasks[citizenid] = nil
     
-    DebugPrint('Player ' .. GetPlayerName(source) .. ' completed task. Remaining: ' .. playersInService[identifier])
-    
-    -- Update database (optimized query)
-    MySQL.Async.execute('UPDATE community_service SET spots_remaining = @spots_remaining WHERE identifier = @identifier', {
-        ['@identifier'] = identifier,
-        ['@spots_remaining'] = playersInService[identifier]
-    })
-    
-    -- Notify player of progress
-    SendClientNotification(source, 'Community Service', _('task_completed', playersInService[identifier]), 'success')
-    
-    -- Clear the current task
-    playerTasks[identifier] = nil
-    
-    -- Check if service is completed
-    if playersInService[identifier] <= 0 then
-        -- Release the player
-        ReleaseFromService(xPlayer)
+    if newCount <= 0 then
+        ReleaseFromService(source, citizenid)
     else
-        -- Continue service, update task count
-        TriggerClientEvent('zcs:updateTaskCount', source, playersInService[identifier])
-        
-        -- Reset processing flag after a delay
-        Citizen.SetTimeout(1000, function()
-            processingTasks[identifier] = nil
-            DebugPrint('Processing flag reset for player ' .. GetPlayerName(source))
-        end)
+        TriggerClientEvent('zcs:updateTaskCount', source, newCount)
+        SetTimeout(1000, function() processingTasks[citizenid] = nil end)
     end
 end)
 
--- Release from service function - improved with error handling
-function ReleaseFromService(xPlayer)
-    local identifier = xPlayer.getIdentifier()
-    local source = xPlayer.source
+function ReleaseFromService(source, citizenid)
+    if releaseInProgress[citizenid] then return end
+    releaseInProgress[citizenid] = true
     
-    -- Check if release is already in progress
-    if releaseInProgress[identifier] then
-        DebugPrint('Release already in progress for player ' .. GetPlayerName(source))
-        return
-    end
+    local spots_assigned = MySQL.scalar.await('SELECT spots_assigned FROM community_service WHERE citizenid = ?', {citizenid})
+    local completedValue = spots_assigned or 0
     
-    -- Set release in progress flag
-    releaseInProgress[identifier] = true
+    MySQL.query.await('DELETE FROM community_service WHERE citizenid = ?', {citizenid})
     
-    -- Get the number of completed tasks for logging
-    MySQL.Async.fetchScalar('SELECT spots_assigned FROM community_service WHERE identifier = @identifier', {
-        ['@identifier'] = identifier
-    }, function(spots_assigned)
-        local tasksCompleted = spots_assigned or 0
-        
-        -- Remove from database
-        MySQL.Async.execute('DELETE FROM community_service WHERE identifier = @identifier', {
-            ['@identifier'] = identifier
-        }, function()
-            -- Remove from active service list
-            playersInService[identifier] = nil
-            playerTasks[identifier] = nil
-            playerLastTaskTime[identifier] = nil
-            processingTasks[identifier] = nil
-            
-            -- Notify player
-            TriggerClientEvent('zcs:releaseFromService', source)
-            SendClientNotification(source, 'Community Service', _('service_completed'), 'success', 7000)
-            
-            -- Log to Discord
-            LogServiceCompletion(GetPlayerName(source), identifier, tasksCompleted)
-            
-            DebugPrint('Player ' .. GetPlayerName(source) .. ' released from community service')
-            
-            -- Clear release in progress flag after a delay
-            Citizen.SetTimeout(5000, function()
-                releaseInProgress[identifier] = nil
-            end)
-        end)
-    end)
+    playersInService[citizenid] = nil
+    playerTasks[citizenid] = nil
+    playerLastTaskTime[citizenid] = nil
+    processingTasks[citizenid] = nil
+    
+    TriggerClientEvent('zcs:releaseFromService', source)
+    SendClientNotification(source, 'Community Service', _('service_completed'), 'success', 7000)
+    LogServiceCompletion(GetPlayerName(source), citizenid, completedValue)
+    
+    SetTimeout(5000, function() releaseInProgress[citizenid] = nil end)
 end
 
--- Check player on connect (optimized)
-AddEventHandler('esx:playerLoaded', function(playerId, xPlayer)
-    local identifier = xPlayer.getIdentifier()
+-- Player connection/disconnection
+AddEventHandler('qbx_core:server:onPlayerLoaded', function(source)
+    local playerData = GetPlayerData(source)
+    if not playerData then return end
     
-    -- Check if player has pending community service (optimized query)
-    MySQL.Async.fetchScalar('SELECT spots_remaining FROM community_service WHERE identifier = @identifier', {
-        ['@identifier'] = identifier
-    }, function(spots_remaining)
-        if spots_remaining and spots_remaining > 0 then
-            -- Add to active service list
-            playersInService[identifier] = spots_remaining
-            
-            -- Notify player and start service
-            TriggerClientEvent('zcs:startService', playerId, spots_remaining)
-            SendClientNotification(playerId, 'Community Service', _('service_started', spots_remaining), 'info', 7000)
-            
-            DebugPrint('Player ' .. GetPlayerName(playerId) .. ' reconnected with ' .. spots_remaining .. ' tasks remaining')
-        end
-    end)
+    local citizenid = playerData.citizenid
+    local remaining = MySQL.scalar.await('SELECT spots_remaining FROM community_service WHERE citizenid = ?', {citizenid})
+    
+    if remaining and remaining > 0 then
+        playersInService[citizenid] = remaining
+        TriggerClientEvent('zcs:startService', source, remaining)
+        SendClientNotification(source, 'Community Service', _('service_started', remaining), 'info', 7000)
+    end
 end)
 
--- Clean up resources when player disconnects
+
+-- State Cleanup on Disconnect
 AddEventHandler('playerDropped', function()
     local source = source
-    local identifier = GetPlayerIdentifier(source, 0)
-    
-    if identifier then
-        -- Don't remove from playersInService as they need to resume on reconnect
-        playerTasks[identifier] = nil
-        playerLastTaskTime[identifier] = nil
-        processingTasks[identifier] = nil
-        releaseInProgress[identifier] = nil
-        
-        -- Clean up other tracking data
-        if eventCooldowns[identifier] then
-            eventCooldowns[identifier] = nil
-        end
-        
-        if playerLastPositions[identifier] then
-            playerLastPositions[identifier] = nil
-        end
+    local playerData = GetPlayerData(source)
+    if playerData then
+        processingTasks[playerData.citizenid] = nil
+        playerTasks[playerData.citizenid] = nil
     end
 end)
-
--- Clean up on resource stop
-AddEventHandler('onResourceStop', function(resourceName)
-    if GetCurrentResourceName() ~= resourceName then
-        return
-    end
-    
-    -- Clean up processing flags
-    processingTasks = {}
-    releaseInProgress = {}
-    
-    DebugPrint('Resource stopped, cleaned up all resources')
-end)
-
