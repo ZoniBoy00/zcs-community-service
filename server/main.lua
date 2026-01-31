@@ -4,6 +4,15 @@ local function GetPlayerData(id)
     return p and p.PlayerData
 end
 
+local function GetCharacterName(source)
+    local p = exports.qbx_core:GetPlayer(source)
+    if p and p.PlayerData and p.PlayerData.charinfo then
+        local ci = p.PlayerData.charinfo
+        return ci.firstname .. ' ' .. ci.lastname
+    end
+    return GetPlayerName(source)
+end
+
 -- State Tracking
 local processingTasks = {}
 local releaseInProgress = {}
@@ -65,11 +74,11 @@ RegisterNetEvent('zcs:checkInitialService', function()
 
     local citizenid = playerData.citizenid
     if playersInService[citizenid] then
-        DebugPrint('Player ' .. GetPlayerName(source) .. ' rejoined and is still in service.')
+        DebugPrint('Player ' .. GetCharacterName(source) .. ' rejoined and is still in service.')
         TriggerClientEvent('zcs:startService', source, playersInService[citizenid])
         SendClientNotification(source, 'Community Service', _('service_rejoined', playersInService[citizenid]), 'info', 7000)
     else
-        DebugPrint('Player ' .. GetPlayerName(source) .. ' checked initial service but is not in the list.')
+        DebugPrint('Player ' .. GetCharacterName(source) .. ' checked initial service but is not in the list.')
     end
 end)
 
@@ -111,10 +120,10 @@ local function AssignService(source, targetSource, spotCount, isSelf)
         if not isSelf then
             local officerData = GetPlayerData(source)
             SendClientNotification(source, 'Community Service', _('player_sent', spotCount), 'success')
-            LogServiceAssignment(GetPlayerName(source), officerData and officerData.citizenid or "Unknown", GetPlayerName(targetSource), citizenid, spotCount)
+            LogServiceAssignment(GetCharacterName(source), officerData and officerData.citizenid or "Unknown", GetCharacterName(targetSource), citizenid, spotCount)
         end
         
-        DebugPrint('Successfully assigned service to ' .. GetPlayerName(targetSource))
+        DebugPrint('Successfully assigned service to ' .. GetCharacterName(targetSource))
     else
         DebugPrint('DATABASE ERROR: Failed to insert/update community_service for ' .. citizenid)
     end
@@ -164,7 +173,7 @@ RegisterNetEvent('zcs:addTasks', function(target, addCount)
     MySQL.query('UPDATE community_service SET spots_assigned = spots_assigned + ?, spots_remaining = spots_remaining + ? WHERE citizenid = ?', 
         {addCount, addCount, citizenid})
     
-    LogTasksAdded(GetPlayerName(source), officerData.citizenid, GetPlayerName(target), citizenid, addCount, newCount)
+    LogTasksAdded(GetCharacterName(source), officerData.citizenid, GetCharacterName(target), citizenid, addCount, newCount)
     
     TriggerClientEvent('zcs:updateTaskCount', target, newCount)
     SendClientNotification(target, 'Community Service', _('service_extended', addCount), 'info', 7000)
@@ -185,7 +194,7 @@ RegisterNetEvent('zcs:checkPlayerStatus', function(target)
         return
     end
     
-    local statusMessage = string.format(_('player_status'), GetPlayerName(target), playersInService[citizenid])
+    local statusMessage = string.format(_('player_status'), GetCharacterName(target), playersInService[citizenid])
     SendClientNotification(source, 'Status', statusMessage, 'info')
 end)
 
@@ -204,7 +213,7 @@ RegisterNetEvent('zcs:releasePlayer', function(target)
     ReleaseFromService(target, citizenid)
     
     SendClientNotification(source, 'Community Service', _('player_released'), 'success')
-    LogForceRelease(GetPlayerName(source), officerData.citizenid, GetPlayerName(target), citizenid, remainingTasks)
+    LogForceRelease(GetCharacterName(source), officerData.citizenid, GetCharacterName(target), citizenid, remainingTasks)
 end)
 
 RegisterNetEvent('zcs:releaseSelf', function()
@@ -222,7 +231,7 @@ RegisterNetEvent('zcs:requestTask', function()
     local citizenid = playerData.citizenid
     
     if not playersInService[citizenid] then 
-        DebugPrint('Request rejected: ' .. GetPlayerName(source) .. ' not in service list.')
+        DebugPrint('Request rejected: ' .. GetCharacterName(source) .. ' not in service list.')
         return 
     end
     
@@ -253,7 +262,7 @@ RegisterNetEvent('zcs:requestTask', function()
     
     playerTasks[citizenid] = { index = spotIndex, position = spot, taskType = taskType }
     TriggerClientEvent('zcs:receiveTask', source, spotIndex, spot, taskType)
-    DebugPrint('Sent task ' .. taskType .. ' to ' .. GetPlayerName(source))
+    DebugPrint('Sent task ' .. taskType .. ' to ' .. GetCharacterName(source))
     
     SetTimeout(1000, function() processingTasks[citizenid] = nil end)
 end)
@@ -316,7 +325,7 @@ function ReleaseFromService(source, citizenid)
     
     TriggerClientEvent('zcs:releaseFromService', source)
     SendClientNotification(source, 'Community Service', _('service_completed'), 'success', 7000)
-    LogServiceCompletion(GetPlayerName(source), citizenid, completedValue)
+    LogServiceCompletion(GetCharacterName(source), citizenid, completedValue)
     
     SetTimeout(5000, function() releaseInProgress[citizenid] = nil end)
 end
@@ -345,4 +354,25 @@ AddEventHandler('playerDropped', function()
         processingTasks[playerData.citizenid] = nil
         playerTasks[playerData.citizenid] = nil
     end
+end)
+
+-- Callback to get online players with character names
+lib.callback.register('zcs:server:getOnlinePlayers', function(source)
+    local players = {}
+    local activePlayers = exports.qbx_core:GetQBPlayers()
+    
+    for _, v in pairs(activePlayers) do
+        local charinfo = v.PlayerData.charinfo
+        table.insert(players, {
+            id = v.PlayerData.source,
+            name = charinfo.firstname .. ' ' .. charinfo.lastname,
+            label = string.format('[%s] %s %s', v.PlayerData.source, charinfo.firstname, charinfo.lastname)
+        })
+    end
+    
+    table.sort(players, function(a, b)
+        return a.id < b.id
+    end)
+    
+    return players
 end)

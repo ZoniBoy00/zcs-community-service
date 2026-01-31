@@ -49,14 +49,7 @@ local taskTypes = {
         name = "Weeding",
         label = _('label_weeding'),
         icon = "fas fa-seedling",
-        dict = "amb@world_human_gardener_plant@male@base",
-        anim = "base",
-        prop = {
-            model = "prop_cs_trowel",
-            bone = 28422,
-            pos = vector3(0.0, 0.0, -0.03),
-            rot = vector3(0.0, 0.0, 0.0)
-        },
+        scenario = "WORLD_HUMAN_GARDENER_PLANT",
         progressLabel = _('progress_weeding')
     },
     {

@@ -1,30 +1,5 @@
 -- Community Service Menu System (Powered by ox_lib)
 
-local function GetOnlinePlayers()
-    local players = {}
-    local activePlayers = GetActivePlayers()
-    
-    for i = 1, #activePlayers do
-        local id = activePlayers[i]
-        local serverId = GetPlayerServerId(id)
-        local name = GetPlayerName(id)
-        
-        if serverId and name then
-            table.insert(players, {
-                id = serverId,
-                name = name,
-                label = string.format('[%s] %s', serverId, name)
-            })
-        end
-    end
-    
-    table.sort(players, function(a, b)
-        return a.id < b.id
-    end)
-    
-    return players
-end
-
 local function OpenTaskCountMenu(playerId, action)
     lib.registerContext({
         id = 'zcs_task_count',
@@ -61,7 +36,9 @@ end
 local OpenMainMenu -- Forward declaration
 
 local function OpenPlayerSelectionMenu(action)
-    local players = GetOnlinePlayers()
+    local players = lib.callback.await('zcs:server:getOnlinePlayers', false)
+    if not players then return end
+    
     local options = {}
     
     for i = 1, #players do
